@@ -269,14 +269,21 @@ _INSERT_OR_IGNORE_RE = re.compile(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO", re.IGNOREC
 
 def _translate_sql(sql: str) -> str:
     """Convert SQLite-flavoured SQL to PostgreSQL.
-    Safe to call on already-translated or vanilla SQL — idempotent for our usage.
+
+    Order matters:
+      1. Rewrite `INSERT OR IGNORE` to `INSERT ... ON CONFLICT DO NOTHING`.
+      2. Escape literal `%` (e.g. in `LIKE 'Player #%'`) to `%%` so psycopg2's
+         format-substitution does NOT try to interpret it as a placeholder.
+      3. Replace `?` with `%s` (psycopg2 parameter style).
+
+    Step 2 must happen BEFORE step 3, otherwise the new `%s` placeholders we
+    just introduced would get doubled into `%%s` and break parameter binding.
     """
     if _INSERT_OR_IGNORE_RE.search(sql):
         sql = _INSERT_OR_IGNORE_RE.sub("INSERT INTO", sql)
         if "ON CONFLICT" not in sql.upper():
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
-    # SQLite '?' -> psycopg2 '%s'. We don't put '?' inside string literals in
-    # our codebase, so a global replace is safe.
+    sql = sql.replace("%", "%%")
     sql = sql.replace("?", "%s")
     return sql
 
