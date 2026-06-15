@@ -40,12 +40,15 @@ ELO_K_FACTOR: dict[str, int] = {
 DEFAULT_ELO: float = 1500.0
 
 # Draw model: P(draw) maxes at equal ELOs and decays gaussian-style with gap.
-# Calibration targets:
+# Calibration targets (sigma = 350):
 #   elo_diff = 0   -> P_draw ≈ 0.28
-#   elo_diff = 200 -> P_draw ≈ 0.10
-#   elo_diff = 400 -> P_draw ≈ 0.02
+#   elo_diff = 200 -> P_draw ≈ 0.20
+#   elo_diff = 400 -> P_draw ≈ 0.07
+#   elo_diff = 600 -> P_draw ≈ 0.01
+# Wider sigma than the academic ELO default because World Cup matches see
+# more draws than the pure 2-way model predicts, especially at moderate gaps.
 _DRAW_MAX:   float = 0.28
-_DRAW_SIGMA: float = 200.0
+_DRAW_SIGMA: float = 350.0
 
 
 # ===========================================================================
