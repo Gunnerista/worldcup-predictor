@@ -557,6 +557,100 @@ def sync_live() -> None:
         conn.close()
 
 
+def sync_live_lite() -> dict:
+    """Rate-limit-safe 2026 live refresh.
+
+    API budget per call (key limit is ~5 req/min):
+      - /matches (2026)                     : 1 paginated fetch (always)
+      - /team_match_stats                   : only for matches whose status
+                                              flipped to 'completed' since the
+                                              last sync (batched)
+      - /match_momentum                     : only for in-progress/live matches
+                                              (batched)
+
+    Deliberately does NOT call player_match_stats / match_shots / match_events
+    to protect the rate limit during a live matchday.
+
+    Scores/status are written with an explicit UPDATE because upsert_matches()
+    uses INSERT OR IGNORE, which never touches existing rows.
+
+    Returns: {matches_seen, updated, newly_completed, in_progress}
+    """
+    database.init_db()
+    conn = database.get_connection()
+    try:
+        matches = fetch_matches([2026])
+
+        # Snapshot current DB state to detect score/status changes.
+        prev: dict[int, dict] = {}
+        for r in conn.execute(
+            "SELECT id, home_score, away_score, status FROM matches WHERE season = ?",
+            (2026,),
+        ).fetchall():
+            prev[r["id"]] = {
+                "home_score": r["home_score"],
+                "away_score": r["away_score"],
+                "status": (r["status"] or "").lower(),
+            }
+
+        # Insert brand-new matches (also ensures team rows exist).
+        upsert_matches(conn, matches)
+
+        newly_completed: list[int] = []
+        in_progress: list[int] = []
+        updated = 0
+
+        cur = conn.cursor()
+        for m in matches:
+            mid = m.get("id")
+            if mid is None:
+                continue
+            status = (m.get("status") or "").lower()
+            hs = m.get("home_score")
+            as_ = m.get("away_score")
+
+            before = prev.get(mid)
+            # INSERT OR IGNORE won't update existing rows -> explicit UPDATE.
+            cur.execute(
+                "UPDATE matches SET home_score = ?, away_score = ?, status = ? "
+                "WHERE id = ?",
+                (hs, as_, m.get("status"), mid),
+            )
+
+            if before is None:
+                updated += 1
+            elif (before["home_score"] != hs
+                  or before["away_score"] != as_
+                  or before["status"] != status):
+                updated += 1
+
+            if status == "completed" and (before is None or before["status"] != "completed"):
+                newly_completed.append(mid)
+            if status in {"in_progress", "live"}:
+                in_progress.append(mid)
+
+        conn.commit()
+
+        # Newly completed -> one team_match_stats pull (final box score).
+        if newly_completed:
+            items = _fetch_for_matches("/team_match_stats", newly_completed)
+            upsert_team_stats(conn, items)
+
+        # In-progress -> momentum only.
+        if in_progress:
+            items = _fetch_for_matches("/match_momentum", in_progress)
+            upsert_momentum(conn, items)
+
+        return {
+            "matches_seen": len(matches),
+            "updated": updated,
+            "newly_completed": len(newly_completed),
+            "in_progress": len(in_progress),
+        }
+    finally:
+        conn.close()
+
+
 def get_today_matches(today: date | None = None) -> list[dict]:
     """2026 matches scheduled for the given UTC date (defaults to today)."""
     target = today or date.today()

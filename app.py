@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from datetime import date
 from typing import Optional
@@ -585,6 +586,60 @@ def save_notes(match_id: int):
     finally:
         conn.close()
     return redirect(url_for("match_detail", match_id=match_id))
+
+
+# --------------------------------------------------------------------------
+# Background live-sync worker
+# --------------------------------------------------------------------------
+#
+# Polls BALLDONTLIE via data_pipeline.sync_live_lite() so the DB (and thus the
+# SSE stream) actually receives fresh 2026 scores. Cadence adapts to whether a
+# match is live: 60s with live matches, 300s otherwise.
+#
+# RATE-LIMIT CAVEAT: with multiple gunicorn workers, EACH worker process starts
+# its own thread -> the API is hit Nx. On Railway run a single web worker, or
+# set ENABLE_LIVE_SYNC=0 on all but one. The Lock below only guards against
+# overlap WITHIN a process, not across worker processes.
+
+_sync_lock = threading.Lock()
+_sync_thread_started = False
+
+LIVE_INTERVAL_SEC = 60
+IDLE_INTERVAL_SEC = 300
+
+
+def _live_sync_loop() -> None:
+    while True:
+        interval = IDLE_INTERVAL_SEC
+        try:
+            with _sync_lock:
+                result = data_pipeline.sync_live_lite()
+            print(f"[sync] updated {result['updated']} matches "
+                  f"(seen={result['matches_seen']}, "
+                  f"completed+={result['newly_completed']}, "
+                  f"live={result['in_progress']})", flush=True)
+            interval = LIVE_INTERVAL_SEC if result.get("in_progress", 0) > 0 else IDLE_INTERVAL_SEC
+        except Exception as e:
+            # Never let the worker thread die — log and keep looping.
+            print(f"[sync] error: {e}", file=sys.stderr, flush=True)
+            interval = IDLE_INTERVAL_SEC
+        time.sleep(interval)
+
+
+def _start_sync_thread() -> None:
+    global _sync_thread_started
+    if _sync_thread_started:
+        return
+    if os.environ.get("ENABLE_LIVE_SYNC", "1").strip() not in ("1", "true", "yes"):
+        print("[sync] live-sync disabled (ENABLE_LIVE_SYNC)", flush=True)
+        return
+    _sync_thread_started = True
+    threading.Thread(target=_live_sync_loop, name="live-sync", daemon=True).start()
+    print("[sync] background live-sync thread started", flush=True)
+
+
+# Start at import time so gunicorn (not just `python app.py`) runs the worker.
+_start_sync_thread()
 
 
 # --------------------------------------------------------------------------

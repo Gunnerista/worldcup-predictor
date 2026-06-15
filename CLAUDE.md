@@ -110,7 +110,7 @@ worldcup-predictor/
 ├── data_pipeline.py      # BALLDONTLIE 백필 (CLI: backfill/sync/today/live/names/events)
 ├── polymarket.py         # Polymarket Gamma 클라이언트
 ├── migrate.py            # SQLite → Railway PG 일회성 데이터 마이그레이션
-├── Procfile              # web: gunicorn app:app
+├── Procfile              # web: gunicorn app:app --workers 1
 ├── requirements.txt
 ├── templates/
 │   ├── index.html        # 오늘 경기 카드 목록
@@ -178,7 +178,8 @@ FLASK_DEBUG=True
 ### 11.3 Railway
 - **`database.init_db()`는 모듈 레벨에서 호출되어야 함.** `if __name__ == "__main__":` 안에 두면 gunicorn에선 안 돌아감 → 첫 요청에서 "no such table" 크래시.
 - **`.gitignore`의 `*.db`가 worldcup.db를 제외.** Railway 첫 부팅 시 빈 DB. 데이터 옮기려면 `python migrate.py` (로컬에서 실행, DATABASE_URL은 Railway PG 공용 URL).
-- **`Procfile`은 `web: gunicorn app:app` 만으로 충분** — Railway Nixpacks가 자동으로 `--bind 0.0.0.0:$PORT` 처리.
+- **`Procfile`은 `web: gunicorn app:app --workers 1`** — Railway Nixpacks가 자동으로 `--bind 0.0.0.0:$PORT` 처리.
+- **gunicorn 워커 1개 필수 (`--workers 1`) — 멀티워커 시 sync 스레드 중복 실행으로 rate-limit 즉시 초과.**
 - **에러 핸들러 `@app.errorhandler(Exception)`** 가 traceback을 stderr로 dump → Railway Logs에 표시. `DEBUG_TRACEBACK=1` 시 브라우저에도 표시.
 
 ### 11.4 Polymarket
