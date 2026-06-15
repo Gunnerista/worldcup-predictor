@@ -26,17 +26,23 @@
     <div class="prob-bar">
         <div class="pb-row r1">
             <span class="name">{{ bundle.team1 }}</span>
-            <span class="pb-track"><span class="pb-fill f1 prob-bar-team1" style="width: {{ bundle.p1 }}%; background:#1D9E75"></span></span>
+            <div class="prob-track" style="flex:1; height:10px; background:#1a2035; border-radius:5px; overflow:hidden;">
+                <div class="prob-bar-team1" style="width: {{ bundle.p1 }}%; height:100%; background:#1D9E75;"></div>
+            </div>
             <span class="pct">{{ bundle.p1 }}%</span>
         </div>
         <div class="pb-row rd">
             <span class="name">Draw</span>
-            <span class="pb-track"><span class="pb-fill fd prob-bar-draw" style="width: {{ bundle.pdraw }}%; background:#4a5568"></span></span>
+            <div class="prob-track" style="flex:1; height:10px; background:#1a2035; border-radius:5px; overflow:hidden;">
+                <div class="prob-bar-draw" style="width: {{ bundle.pdraw }}%; height:100%; background:#4a5568;"></div>
+            </div>
             <span class="pct">{{ bundle.pdraw }}%</span>
         </div>
         <div class="pb-row r2">
             <span class="name">{{ bundle.team2 }}</span>
-            <span class="pb-track"><span class="pb-fill f2 prob-bar-team2" style="width: {{ bundle.p2 }}%; background:#378ADD"></span></span>
+            <div class="prob-track" style="flex:1; height:10px; background:#1a2035; border-radius:5px; overflow:hidden;">
+                <div class="prob-bar-team2" style="width: {{ bundle.p2 }}%; height:100%; background:#378ADD;"></div>
+            </div>
             <span class="pct">{{ bundle.p2 }}%</span>
         </div>
     </div>
