@@ -90,15 +90,15 @@ P(0-0) = {{ '%.4f'|format(bundle.p00) }}   P(1-0) = {{ '%.4f'|format(bundle.p10)
 
     <!-- ================= SHARED: scorelines + strength ================= -->
 
-    {% if bundle.scorelines %}
+    {% if bundle.scoreline_matrix %}
     <section class="section">
         <h2>Scoreline Probability</h2>
         <div class="scoreline-list">
-            {% for s in bundle.scorelines %}
+            {% for sl in bundle.scoreline_matrix %}
             <div class="sl-row">
-                <span class="sl">{{ s.scoreline }}</span>
-                <span class="sl-track"><span class="sl-fill" style="width: {{ (s.probability_pct / bundle.scorelines[0].probability_pct * 100)|round|int }}%"></span></span>
-                <span class="sl-pct">{{ s.probability_pct }}%</span>
+                <span class="sl">{{ sl.scoreline }}</span>
+                <div class="sl-track"><div class="sl-fill" style="width: {{ sl.probability_pct / bundle.top_pct * 100 }}%; background:#EF9F27"></div></div>
+                <span class="sl-pct">{{ sl.probability_pct }}%</span>
             </div>
             {% endfor %}
         </div>

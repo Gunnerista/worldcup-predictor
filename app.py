@@ -440,6 +440,9 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             ctx_parts.append(f"{time_str} UTC")
         ctx_line = " · ".join(ctx_parts)
 
+        scorelines = pred["top_scorelines"][:5]
+        top_pct = scorelines[0]["probability_pct"] if scorelines else 1
+
         b = {
             "match":     match,
             "team1":     t1,
@@ -457,7 +460,9 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             "p00":       mtx.get((0, 0), 0.0),
             "p10":       mtx.get((1, 0), 0.0),
             "p11":       mtx.get((1, 1), 0.0),
-            "scorelines": pred["top_scorelines"][:5],
+            "scorelines": scorelines,
+            "scoreline_matrix": scorelines,
+            "top_pct": top_pct,
             "situation": pred.get("situation"),
             "upset_pct": upset_pct,
             "model_used": "Dixon-Coles v1",
