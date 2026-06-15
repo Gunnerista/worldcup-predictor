@@ -1504,47 +1504,52 @@ def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str,
     (defense > 1.0 is a *weaker* defense, per Dixon-Coles convention).
 
     Returns {team_name: {"attack": float, "defense": float}}.
-    Returns {} if the database file is missing.
-    """
-    import os
-    import sqlite3
+    Returns {} if the data is unavailable.
 
-    if not os.path.exists(db_path):
+    Works against either backend via database.get_connection() (SQLite locally,
+    PostgreSQL on Railway). db_path is honoured only for the SQLite backend.
+    """
+    import database
+
+    try:
+        conn = database.get_connection(None if db_path == "worldcup.db" else db_path)
+    except Exception:
         return {}
 
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # Per-team goals for / against across all completed matches (home + away).
-    cur.execute(
-        """
-        SELECT t.name,
-               AVG(CASE WHEN ts.is_home = 1 THEN m.home_score ELSE m.away_score END) AS gf,
-               AVG(CASE WHEN ts.is_home = 1 THEN m.away_score ELSE m.home_score END) AS ga
-        FROM team_stats ts
-        JOIN matches m ON ts.match_id = m.id
-        JOIN teams t   ON ts.team_id  = t.id
-        WHERE m.status = 'completed'
-        GROUP BY t.id
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        # Per-team goals for / against across all completed matches (home + away).
+        # GROUP BY includes t.name so PostgreSQL strict-mode accepts the SELECT.
+        rows = conn.execute(
+            """
+            SELECT t.name AS name,
+                   AVG(CASE WHEN ts.is_home = 1 THEN m.home_score ELSE m.away_score END) AS gf,
+                   AVG(CASE WHEN ts.is_home = 1 THEN m.away_score ELSE m.home_score END) AS ga
+            FROM team_stats ts
+            JOIN matches m ON ts.match_id = m.id
+            JOIN teams t   ON ts.team_id  = t.id
+            WHERE m.status = 'completed'
+            GROUP BY t.id, t.name
+            """
+        ).fetchall()
+    except Exception:
+        return {}
+    finally:
+        conn.close()
 
     if not rows:
         return {}
 
     # League average goals per team per match (== avg goals_for == avg goals_against).
-    league_avg = sum(gf for _, gf, _ in rows) / len(rows)
+    league_avg = sum(r["gf"] for r in rows) / len(rows)
     if league_avg <= 0:
         return {}
 
     return {
-        name: {
-            "attack": gf / league_avg,
-            "defense": ga / league_avg,
+        r["name"]: {
+            "attack": r["gf"] / league_avg,
+            "defense": r["ga"] / league_avg,
         }
-        for name, gf, ga in rows
+        for r in rows
     }
 
 
@@ -1558,14 +1563,13 @@ def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
     2026 tournament itself: top 10 seeded from current FIFA ranking, everyone
     else left at DEFAULT_ELO.
 
-    Returns {team_name: current_elo} for every team with a rating.
-    Returns {} if the database file is missing.
-    """
-    import os
-    import sqlite3
+    Returns {team_name: current_elo} for every team with a rating. If no 2026
+    results are available yet, returns just the FIFA seeds (no replay).
 
-    if not os.path.exists(db_path):
-        return {}
+    Works against either backend via database.get_connection() (SQLite locally,
+    PostgreSQL on Railway). db_path is honoured only for the SQLite backend.
+    """
+    import database
 
     # FIFA-ranking-based seeds (top 10 only; others fall back to DEFAULT_ELO).
     seeds = {
@@ -1597,8 +1601,11 @@ def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
     for team, rating in seeds.items():
         elo.set_rating(team, rating)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    try:
+        conn = database.get_connection(None if db_path == "worldcup.db" else db_path)
+    except Exception:
+        return dict(elo.ratings)   # DB unreachable -> seeds only
+
     try:
         rows = conn.execute(
             """
@@ -1612,6 +1619,8 @@ def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
             ORDER BY m.kickoff_utc ASC
             """
         ).fetchall()
+    except Exception:
+        rows = []
     finally:
         conn.close()
 

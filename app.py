@@ -631,6 +631,7 @@ IDLE_INTERVAL_SEC = 300
 
 
 def _live_sync_loop() -> None:
+    global _elo
     while True:
         interval = IDLE_INTERVAL_SEC
         try:
@@ -653,6 +654,12 @@ def _live_sync_loop() -> None:
                 except Exception as e:
                     # Enrich failure must not kill the sync loop.
                     print(f"[sync] enrich error: {e}", file=sys.stderr, flush=True)
+
+                # New results changed the standings -> drop the cached engine so
+                # the next prediction request rebuilds ELO (same lazy pattern as
+                # _ensure_engines). GIL makes this assignment atomic.
+                _elo = None
+                print("[sync] ELO invalidated; rebuilds on next prediction", flush=True)
 
             interval = LIVE_INTERVAL_SEC if result.get("in_progress", 0) > 0 else IDLE_INTERVAL_SEC
         except Exception as e:
