@@ -1418,6 +1418,80 @@ class DixonColesEngine:
 
         return None
 
+    def _resolve_team_name(self, name: str) -> str:
+        """Map an aliased team name to its canonical teams.name via TEAM_ALIASES.
+
+        Mirrors _resolve_strength's alias logic but returns the DB name (for use
+        in raw SQL lookups). Returns the input unchanged when it is not a known
+        alias — it is then assumed to already be a canonical DB name.
+        """
+        for db_name, aliases in self.TEAM_ALIASES.items():
+            if name == db_name or name in aliases:
+                return db_name
+        lower = name.lower()
+        for db_name, aliases in self.TEAM_ALIASES.items():
+            if lower == db_name.lower() or lower in [a.lower() for a in aliases]:
+                return db_name
+        return name
+
+    def _player_xg_adjustment(
+        self,
+        team_name: str,
+        conn=None,
+        db_path: str = "worldcup.db",
+    ) -> float:
+        """Lineup-form multiplier from player xG (2026 only).
+
+        Compares the team's MOST RECENT completed 2026 match total player xG to
+        its average per-match player xG across 2026:
+            >1.0  -> latest lineup/performance out-produced the team's norm
+            <1.0  -> below the norm
+
+        Returns 1.0 when no player_stats data exists (fallback). Clamped to
+        [0.7, 1.4] so a single outlier match can't dominate the model.
+
+        Pass an open `conn` to reuse a connection; otherwise one is opened via
+        database.get_connection() (dual backend) and closed here. Aliased team
+        names are resolved to the canonical teams.name via _resolve_team_name().
+        """
+        import database
+
+        db_name = self._resolve_team_name(team_name)
+
+        own_conn = conn is None
+        if own_conn:
+            try:
+                conn = database.get_connection(None if db_path == "worldcup.db" else db_path)
+            except Exception:
+                return 1.0
+        try:
+            rows = conn.execute(
+                """
+                SELECT m.kickoff_utc AS k, SUM(ps.expected_goals) AS match_xg
+                FROM player_stats ps
+                JOIN matches m ON m.id = ps.match_id
+                JOIN teams t   ON t.id = ps.team_id
+                WHERE t.name = ? AND m.season = 2026 AND m.status = 'completed'
+                GROUP BY ps.match_id, m.kickoff_utc
+                ORDER BY m.kickoff_utc DESC
+                """,
+                (db_name,),
+            ).fetchall()
+        except Exception:
+            return 1.0
+        finally:
+            if own_conn:
+                conn.close()
+
+        xgs = [r["match_xg"] for r in rows if r["match_xg"] is not None]
+        if not xgs:
+            return 1.0
+        recent = xgs[0]
+        avg = sum(xgs) / len(xgs)
+        if avg <= 0:
+            return 1.0
+        return max(0.7, min(1.4, recent / avg))
+
     def predict_from_db(
         self,
         home_name: str,
@@ -1433,17 +1507,24 @@ class DixonColesEngine:
         team name. Falls back to 1.0/1.0 (league-average) for any team not found.
 
         Adds a "strength_source" key to the result reporting which side(s) used
-        DB strengths vs. the league-average fallback.
+        DB strengths vs. the league-average fallback, and a "player_adjustment"
+        key with the lineup-form multipliers applied to each side's λ.
         """
         strengths = _team_strengths_from_db(db_path)
 
         home = self._resolve_strength(home_name, strengths)
         away = self._resolve_strength(away_name, strengths)
 
-        ha = home["attack"]  if home is not None else 1.0
-        hd = home["defense"] if home is not None else 1.0
-        aa = away["attack"]  if away is not None else 1.0
-        ad = away["defense"] if away is not None else 1.0
+        # Lineup-form multipliers from player xG. Each scales its own team's λ:
+        # lam ∝ home_attack and mu ∝ away_attack, so multiplying the attack term
+        # by the adjustment multiplies that side's expected goals directly.
+        home_adj = self._player_xg_adjustment(home_name, db_path=db_path)
+        away_adj = self._player_xg_adjustment(away_name, db_path=db_path)
+
+        ha = (home["attack"]  if home is not None else 1.0) * home_adj
+        hd =  home["defense"] if home is not None else 1.0
+        aa = (away["attack"]  if away is not None else 1.0) * away_adj
+        ad =  away["defense"] if away is not None else 1.0
 
         result = self.predict(
             home_elo=home_elo,
@@ -1458,6 +1539,10 @@ class DixonColesEngine:
         result["strength_source"] = {
             "home": "db" if home is not None else "fallback(1.0)",
             "away": "db" if away is not None else "fallback(1.0)",
+        }
+        result["player_adjustment"] = {
+            "home": round(home_adj, 3),
+            "away": round(away_adj, 3),
         }
         return result
 
