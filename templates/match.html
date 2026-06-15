@@ -46,6 +46,40 @@
         </div>
     </section>
 
+    <!-- 1b. Dixon-Coles 스코어 예측 -->
+    <section class="card full dc-detail">
+        <h2>스코어 예측 <span class="model-tag">{{ bundle.model_used }}</span></h2>
+
+        {% if bundle.expected_goals %}
+        <p class="lead">예상 득점(xG) —
+            <b>{{ bundle.home_name }} {{ '%.2f'|format(bundle.expected_goals.home) }}</b>
+            vs
+            <b>{{ bundle.away_name }} {{ '%.2f'|format(bundle.expected_goals.away) }}</b>
+        </p>
+        {% endif %}
+
+        {% if bundle.scoreline_matrix %}
+        <div class="scorelines">
+            {% for s in bundle.scoreline_matrix[:5] %}
+            <span class="scoreline"><b>{{ s.scoreline }}</b> {{ s.probability_pct }}%</span>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if bundle.situation %}
+        <div class="situations">
+            {% if bundle.situation.home %}
+            <div class="sit-row"><span class="t">{{ bundle.home_name }}</span> <span class="note">{{ bundle.situation.home.note }}</span></div>
+            {% endif %}
+            {% if bundle.situation.away %}
+            <div class="sit-row"><span class="t">{{ bundle.away_name }}</span> <span class="note">{{ bundle.situation.away.note }}</span></div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="brier-line">모델 캘리브레이션 (Brier Score): <span id="brierScore">…</span></div>
+    </section>
+
     <div class="grid">
 
         <!-- 2. 이전 경기 복기 -->
@@ -184,5 +218,15 @@
 </footer>
 
 <script src="{{ url_for('static', filename='charts.js') }}"></script>
+<script>
+// Model calibration: pull the live Brier score from /api/brier.
+fetch('/api/brier').then(function (r) { return r.json(); }).then(function (d) {
+    var el = document.getElementById('brierScore');
+    if (!el) return;
+    el.textContent = (d && d.n_matches > 0)
+        ? (d.brier_score.toFixed(3) + ' (' + d.n_matches + '경기 기준, 낮을수록 정확)')
+        : '아직 채점된 경기 없음';
+}).catch(function () {});
+</script>
 </body>
 </html>

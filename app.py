@@ -524,6 +524,7 @@ def index():
             away_pct = round(wdl["away_win"])
             home_sit = (pred.get("situation") or {}).get("home") or {}
             note = home_sit.get("note")
+            expected_goals = pred.get("expected_goals")
         except Exception as e:
             print(f"index: predict error for {home} vs {away}: {e}")
             probs = _elo.get_win_probability(_elo.get_rating(home), _elo.get_rating(away))
@@ -531,6 +532,7 @@ def index():
             draw_pct = round(probs["draw"] * 100)
             away_pct = round(probs["away"] * 100)
             note = None
+            expected_goals = None
         enriched.append({
             "id":         m.get("id"),
             "home_name":  home,
@@ -539,6 +541,7 @@ def index():
             "draw_pct":   draw_pct,
             "away_pct":   away_pct,
             "note":       note,
+            "expected_goals": expected_goals,
             "status":     m.get("status"),
             "kickoff":    m.get("datetime"),
             "home_score": m.get("home_score"),

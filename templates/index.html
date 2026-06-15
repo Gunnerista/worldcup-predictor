@@ -72,6 +72,19 @@
                     </span>
                 </div>
 
+                {% if m.expected_goals %}
+                <div class="xg-mini">
+                    예상 득점(xG) {{ '%.1f'|format(m.expected_goals.home) }} : {{ '%.1f'|format(m.expected_goals.away) }}
+                </div>
+                {% endif %}
+
+                {% if m.note %}
+                <div class="situation-note">
+                    {% if '탈락' in m.note %}⚫{% elif '통과' in m.note or '진출 확정' in m.note %}🟢{% elif '이겨야' in m.note %}🔴{% elif '비기면' in m.note %}🟡{% else %}⚪{% endif %}
+                    {{ m.note }}
+                </div>
+                {% endif %}
+
                 <div class="cta">상세 리포트 보기 →</div>
             </a>
         </li>
