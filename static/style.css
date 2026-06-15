@@ -29,6 +29,9 @@ html, body {
 
 a { color: inherit; text-decoration: none; }
 
+/* Twemoji flag images inline with text */
+img.emoji { height: 1em; width: 1em; vertical-align: -0.12em; margin: 0 1px; }
+
 .label {
     font-family: var(--mono);
     text-transform: uppercase;

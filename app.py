@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import traceback
@@ -382,8 +382,32 @@ TEAM_FLAGS = {
 }
 
 
+EST = timezone(timedelta(hours=-5))   # fixed UTC-5 per spec (note: June is EDT/UTC-4)
+
+
 def _flag(name):
-    return TEAM_FLAGS.get(name, "🏳")
+    # Returns the flag emoji, or "" when unknown. (Browsers on Windows render
+    # flag emoji as the two-letter code unless an emoji image font like Twemoji
+    # is loaded — see base.html.)
+    return TEAM_FLAGS.get(name, "")
+
+
+def _est_dt(iso):
+    """Parse a UTC kickoff string and convert to EST (fixed UTC-5)."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(EST)
+
+
+def _est_time(iso):
+    dt = _est_dt(iso)
+    return dt.strftime("%H:%M") if dt else ""
 
 
 def generate_model_edge(b) -> dict:
@@ -517,14 +541,14 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
 
         group_label = (group_name or "Knockout").upper()
         md = _matchday(conn, group_name, kickoff)
-        time_str = kickoff[11:16] if kickoff and len(kickoff) >= 16 else ""
+        time_str = _est_time(kickoff)
         ctx_parts = [group_label]
         if md:
             ctx_parts.append(f"MATCHDAY {md}")
         if is_post:
             ctx_parts.append("FULL TIME")
         elif time_str:
-            ctx_parts.append(f"{time_str} UTC")
+            ctx_parts.append(f"{time_str} EST")
         ctx_line = " · ".join(ctx_parts)
 
         scorelines = pred["top_scorelines"][:5]
@@ -659,12 +683,15 @@ def _load_match_from_db_or_api(match_id: int) -> Optional[dict]:
 @app.route("/")
 def index():
     _ensure_engines()
-    today = date.today()
+    est_now = datetime.now(timezone.utc).astimezone(EST)
+    today = est_now.date()
     today_str = today.isoformat()
-    start_str = (today - timedelta(days=6)).isoformat()
+    earliest_str = (today - timedelta(days=6)).isoformat()
 
     conn = database.get_connection()
     try:
+        # Widen the UTC window by a day each side: a match's EST date can differ
+        # from its UTC date near midnight, so we filter precisely in Python below.
         rows = conn.execute("""
             SELECT m.id AS id, ht.name AS t1, at.name AS t2,
                    m.kickoff_utc AS k, m.status AS status,
@@ -676,26 +703,31 @@ def index():
               AND substr(m.kickoff_utc, 1, 10) >= ?
               AND substr(m.kickoff_utc, 1, 10) <= ?
             ORDER BY m.kickoff_utc
-        """, (start_str, today_str)).fetchall()
+        """, ((today - timedelta(days=7)).isoformat(),
+              (today + timedelta(days=1)).isoformat())).fetchall()
     finally:
         conn.close()
 
-    # Group fixtures by date for the sidebar; collect today's playable matches.
+    # Group fixtures by EST date for the sidebar; collect today's playable matches.
     by_date: dict = {}
     today_rows = []
     for r in rows:
-        k = r["k"] or ""
-        d = k[:10]
+        est = _est_dt(r["k"])
+        if est is None:
+            continue
+        d = est.date().isoformat()
+        if d < earliest_str or d > today_str:   # last 7 EST days only
+            continue
         st = (r["status"] or "").lower()
         is_live = st in {"live", "in_progress"}
         is_done = st in {"completed", "ft", "finished"}
-        time_str = k[11:16] if len(k) >= 16 else ""
+        time_str = est.strftime("%H:%M")
         if is_done:
             meta, state = f"FT {r['hs']}-{r['as_']}", "done"
         elif is_live:
             meta, state = "LIVE", "live"
         else:
-            meta, state = (f"{time_str} UTC" if time_str else "TBD"), ""
+            meta, state = f"{time_str} EST", ""
         by_date.setdefault(d, []).append({
             "id": r["id"],
             "teams": f"{_flag(r['t1'])} {r['t1']} vs {_flag(r['t2'])} {r['t2']}",
@@ -737,7 +769,7 @@ def index():
                 "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]), "p2": round(wdl["away_win"]),
                 "xg1": eg["home"], "xg2": eg["away"], "note": note,
                 "group": (grp or "").upper(),
-                "time": (k[11:16] if len(k) >= 16 else ""),
+                "time": _est_time(k),
                 "is_live": st in {"live", "in_progress"},
             })
         except Exception as e:
