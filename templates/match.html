@@ -9,15 +9,15 @@
         <div class="ctx">{{ bundle.ctx_line }}</div>
         {% if phase == 'post' %}
         <div class="m-title">
-            <span class="t1">{{ bundle.team1 }}</span>
+            <span class="t1">{{ bundle.flag1 }} {{ bundle.team1 }}</span>
             <span class="score">{{ bundle.score }}</span>
-            <span class="t2">{{ bundle.team2 }}</span>
+            <span class="t2">{{ bundle.flag2 }} {{ bundle.team2 }}</span>
         </div>
         {% else %}
         <div class="m-title">
-            <span class="t1">{{ bundle.team1 }}</span>
+            <span class="t1">{{ bundle.flag1 }} {{ bundle.team1 }}</span>
             <span class="vs">vs</span>
-            <span class="t2">{{ bundle.team2 }}</span>
+            <span class="t2">{{ bundle.flag2 }} {{ bundle.team2 }}</span>
         </div>
         {% endif %}
     </div>
@@ -69,6 +69,9 @@
             &nbsp;&middot;&nbsp;
             <span class="brier">Brier Score: {% if bundle.brier is not none %}{{ '%.2f'|format(bundle.brier) }}{% else %}pending{% endif %}</span>
         </div>
+        {% if bundle.season_record %}
+        <div class="season-record">SEASON RECORD: {{ bundle.season_record.correct }}/{{ bundle.season_record.total }} CORRECT ({{ bundle.season_record.pct }}%)</div>
+        {% endif %}
     </section>
 
     <section class="section">
@@ -86,6 +89,18 @@
 P(0-0) = {{ '%.4f'|format(bundle.p00) }}   P(1-0) = {{ '%.4f'|format(bundle.p10) }}   P(1-1) = {{ '%.4f'|format(bundle.p11) }}</div>
     </section>
 
+    {% if bundle.model_edge %}
+    <section class="section model-edge">
+        <h2>Model Edge</h2>
+        <div class="me-bet">{{ bundle.model_edge.suggested_bet }}</div>
+        <div class="me-stats">
+            <span>Draw edge {{ bundle.model_edge.draw_edge }}pp</span>
+            <span>Total xG {{ bundle.model_edge.total_xg }}</span>
+            <span>Under 2.5 lean: {{ 'yes' if bundle.model_edge.under_lean else 'no' }}</span>
+        </div>
+    </section>
+    {% endif %}
+
     {% endif %}
 
     <!-- ================= SHARED: scorelines + strength ================= -->
@@ -97,7 +112,7 @@ P(0-0) = {{ '%.4f'|format(bundle.p00) }}   P(1-0) = {{ '%.4f'|format(bundle.p10)
             {% for sl in bundle.scoreline_matrix %}
             <div class="sl-row">
                 <span class="sl">{{ sl.scoreline }}</span>
-                <div class="sl-track"><div class="sl-fill" style="width: {{ sl.probability_pct / bundle.top_pct * 100 }}%; background:#EF9F27"></div></div>
+                <div class="sl-track"><div class="sl-fill" style="width: {{ sl.probability_pct / bundle.top_pct * 100 }}%; background:{% if sl.home_goals > sl.away_goals %}#1D9E75{% elif sl.home_goals == sl.away_goals %}#4a5568{% else %}#378ADD{% endif %}"></div></div>
                 <span class="sl-pct">{{ sl.probability_pct }}%</span>
             </div>
             {% endfor %}

@@ -362,6 +362,93 @@ def generate_post_match_review(b) -> str:
     return " ".join(parts)
 
 
+TEAM_FLAGS = {
+    "Belgium": "🇧🇪", "Egypt": "🇪🇬", "Germany": "🇩🇪", "Curaçao": "🇨🇼",
+    "Netherlands": "🇳🇱", "Japan": "🇯🇵", "Sweden": "🇸🇪", "Tunisia": "🇹🇳",
+    "Spain": "🇪🇸", "Cabo Verde": "🇨🇻", "Saudi Arabia": "🇸🇦", "Uruguay": "🇺🇾",
+    "Brazil": "🇧🇷", "Morocco": "🇲🇦", "France": "🇫🇷", "Argentina": "🇦🇷",
+    "England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Portugal": "🇵🇹", "USA": "🇺🇸", "Mexico": "🇲🇽",
+    "Canada": "🇨🇦", "Australia": "🇦🇺", "South Korea": "🇰🇷", "Czechia": "🇨🇿",
+    "South Africa": "🇿🇦", "Qatar": "🇶🇦", "Switzerland": "🇨🇭",
+    "Bosnia and Herzegovina": "🇧🇦", "Bosnia & Herzegovina": "🇧🇦",
+    "Paraguay": "🇵🇾", "Türkiye": "🇹🇷",
+    "Ivory Coast": "🇨🇮", "Côte d'Ivoire": "🇨🇮",
+    "Ecuador": "🇪🇨", "Haiti": "🇭🇹", "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
+    "Iran": "🇮🇷", "Iraq": "🇮🇶", "Jordan": "🇯🇴", "Uzbekistan": "🇺🇿",
+    "Algeria": "🇩🇿", "Senegal": "🇸🇳", "Ghana": "🇬🇭",
+    "Norway": "🇳🇴", "Austria": "🇦🇹", "Croatia": "🇭🇷", "Poland": "🇵🇱",
+    "Colombia": "🇨🇴", "Venezuela": "🇻🇪", "Chile": "🇨🇱", "Peru": "🇵🇪",
+    "DR Congo": "🇨🇩", "Cameroon": "🇨🇲", "Nigeria": "🇳🇬", "New Zealand": "🇳🇿",
+}
+
+
+def _flag(name):
+    return TEAM_FLAGS.get(name, "🏳")
+
+
+def generate_model_edge(b) -> dict:
+    """Identify the strongest betting-decision edge from the model output.
+
+    `draw_edge` compares the model draw probability to a 26% baseline (typical
+    World Cup group-stage draw rate). Advisory only — the operator decides.
+    """
+    draw_edge = b["pdraw"] - 26
+    total_xg = b["eg1"] + b["eg2"]
+    under_lean = total_xg < 2.5
+
+    if draw_edge > 5:
+        suggested = f"DRAW — {draw_edge:.0f}pp above market average"
+    elif under_lean and total_xg < 2.2:
+        suggested = f"UNDER 2.5 — total xG {total_xg:.2f}"
+    elif b["p1"] > 55:
+        suggested = f"{b['team1']} WIN — {b['p1']}% model probability"
+    elif b["p2"] > 55:
+        suggested = f"{b['team2']} WIN — {b['p2']}% model probability"
+    else:
+        suggested = "No clear edge identified"
+
+    return {
+        "suggested_bet": suggested,
+        "draw_edge": round(draw_edge, 1),
+        "total_xg": round(total_xg, 2),
+        "under_lean": under_lean,
+    }
+
+
+def _season_record():
+    """2026 prediction accuracy: how many saved predictions called the winner."""
+    conn = database.get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT p.match_id AS mid, p.home_win_pct AS hp, p.draw_pct AS dp,
+                   p.away_win_pct AS ap, m.home_score AS hs, m.away_score AS as_
+            FROM predictions p
+            JOIN matches m ON m.id = p.match_id
+            WHERE m.season = 2026 AND m.status = 'completed'
+              AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+            ORDER BY p.match_id, p.created_at
+        """).fetchall()
+    except Exception:
+        return {"correct": 0, "total": 0, "pct": 0}
+    finally:
+        conn.close()
+
+    seen, correct, total = set(), 0, 0
+    for r in rows:
+        if r["mid"] in seen:
+            continue
+        seen.add(r["mid"])
+        hp, dp, ap = float(r["hp"]), float(r["dp"]), float(r["ap"])
+        hs, as_ = r["hs"], r["as_"]
+        actual = "home" if hs > as_ else ("away" if hs < as_ else "draw")
+        pred = max([(hp, "home"), (dp, "draw"), (ap, "away")], key=lambda x: x[0])[1]
+        total += 1
+        if pred == actual:
+            correct += 1
+    return {"correct": correct, "total": total,
+            "pct": round(correct / total * 100) if total else 0}
+
+
 def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
     """Render-ready bundle for the MATCHIQ match page (pre + post modes).
 
@@ -447,6 +534,8 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             "match":     match,
             "team1":     t1,
             "team2":     t2,
+            "flag1":     _flag(t1),
+            "flag2":     _flag(t2),
             "code1":     _team_code(t1),
             "code2":     _team_code(t2),
             "ctx_line":  ctx_line,
@@ -472,8 +561,10 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                           "attack": s2["attack"], "defense": s2["defense"]},
         }
         b["narrative_pre"] = generate_pre_match_narrative(b)
+        b["model_edge"] = generate_model_edge(b)
 
         if is_post:
+            b["season_record"] = _season_record()
             # Score / actual winner are pure computations (always safe).
             hs = match.get("home_score") or 0
             as_ = match.get("away_score") or 0
@@ -606,7 +697,8 @@ def index():
         else:
             meta, state = (f"{time_str} UTC" if time_str else "TBD"), ""
         by_date.setdefault(d, []).append({
-            "id": r["id"], "teams": f"{r['t1']} vs {r['t2']}",
+            "id": r["id"],
+            "teams": f"{_flag(r['t1'])} {r['t1']} vs {_flag(r['t2'])} {r['t2']}",
             "meta": meta, "state": state,
         })
         if d == today_str and not is_done:
@@ -641,6 +733,7 @@ def index():
             note = ((pred.get("situation") or {}).get("home") or {}).get("note")
             today_cards.append({
                 "id": r["id"], "team1": t1, "team2": t2,
+                "flag1": _flag(t1), "flag2": _flag(t2),
                 "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]), "p2": round(wdl["away_win"]),
                 "xg1": eg["home"], "xg2": eg["away"], "note": note,
                 "group": (grp or "").upper(),
