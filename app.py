@@ -45,7 +45,7 @@ try:
 except Exception:
     pass
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 # Ensure the SQLite schema exists at import time (runs under gunicorn too,
 # not just `python app.py`). Idempotent: CREATE TABLE IF NOT EXISTS.
@@ -62,8 +62,11 @@ def _handle_unexpected(e):
     if isinstance(e, HTTPException):
         return e
     tb = traceback.format_exc()
-    print(f"\n!!! UNHANDLED EXCEPTION in {request.method} {request.path}\n{tb}",
-          file=sys.stderr, flush=True)
+    banner = (f"\n=== 500 ERROR === {request.method} {request.path}\n"
+              f"{type(e).__name__}: {e}\n{tb}")
+    # Print to BOTH streams so it shows up regardless of how Railway tails logs.
+    print(banner, file=sys.stderr, flush=True)
+    print(banner, flush=True)
     if os.environ.get("DEBUG_TRACEBACK", "").strip() in ("1", "true", "yes"):
         # Show real error to the user — only enable temporarily for diagnosis.
         body = (
