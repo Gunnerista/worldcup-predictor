@@ -2128,6 +2128,116 @@ def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
     return dict(elo.ratings)
 
 
+# ===========================================================================
+# Prediction tracker — store pre-kickoff predictions + Brier calibration
+# ===========================================================================
+
+def save_prediction(match_id, home_win_pct, draw_pct, away_win_pct,
+                    model_version="v1", notes=None, conn=None):
+    """Persist a prediction to the predictions table (percentages 0-100).
+
+    created_at defaults to CURRENT_TIMESTAMP. Pass an open `conn` to batch
+    inside a caller's transaction (the caller then commits); otherwise a
+    connection is opened, committed, and closed here.
+    """
+    import database
+
+    own = conn is None
+    if own:
+        conn = database.get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO predictions "
+            "(match_id, home_win_pct, draw_pct, away_win_pct, model_version, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (match_id, home_win_pct, draw_pct, away_win_pct, model_version, notes),
+        )
+        if own:
+            conn.commit()
+    finally:
+        if own:
+            conn.close()
+
+
+def compute_brier_score(season=2026, conn=None):
+    """Multi-class Brier score over completed, predicted matches.
+
+    BS = (p_home - a_home)^2 + (p_draw - a_draw)^2 + (p_away - a_away)^2
+    where the actual outcome vector is 1.0 for what happened, 0.0 otherwise
+    (range 0..2; lower = better calibration). When a match has several stored
+    predictions, the EARLIEST (pre-kickoff) one is used.
+
+    Returns {"brier_score": float, "n_matches": int, "breakdown": [...]}.
+    """
+    import database
+
+    own = conn is None
+    if own:
+        conn = database.get_connection()
+    import sqlite3 as _sq
+    if isinstance(conn, _sq.Connection) and conn.row_factory is not _sq.Row:
+        conn.row_factory = _sq.Row
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT p.match_id AS match_id,
+                   p.home_win_pct AS hp, p.draw_pct AS dp, p.away_win_pct AS ap,
+                   m.home_score AS hs, m.away_score AS as_,
+                   ht.name AS home, at.name AS away
+            FROM predictions p
+            JOIN matches m ON m.id = p.match_id
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.season = ? AND m.status = 'completed'
+              AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+            ORDER BY p.match_id, p.created_at
+            """,
+            (season,),
+        ).fetchall()
+    finally:
+        if own:
+            conn.close()
+
+    # Keep the earliest prediction per match (rows are ordered by created_at).
+    seen = {}
+    for r in rows:
+        if r["match_id"] not in seen:
+            seen[r["match_id"]] = r
+
+    breakdown = []
+    total = 0.0
+    for r in seen.values():
+        ph = (r["hp"] or 0) / 100.0
+        pd = (r["dp"] or 0) / 100.0
+        pa = (r["ap"] or 0) / 100.0
+        hs, as_ = r["hs"], r["as_"]
+        if hs > as_:
+            a_home, a_draw, a_away, res = 1.0, 0.0, 0.0, "home"
+        elif hs < as_:
+            a_home, a_draw, a_away, res = 0.0, 0.0, 1.0, "away"
+        else:
+            a_home, a_draw, a_away, res = 0.0, 1.0, 0.0, "draw"
+        bs = (ph - a_home) ** 2 + (pd - a_draw) ** 2 + (pa - a_away) ** 2
+        total += bs
+        breakdown.append({
+            "match_id": r["match_id"],
+            "match": f"{r['home']} vs {r['away']}",
+            "predicted": {"home": round(ph * 100, 1),
+                          "draw": round(pd * 100, 1),
+                          "away": round(pa * 100, 1)},
+            "actual": res,
+            "brier": round(bs, 4),
+        })
+
+    n = len(breakdown)
+    return {
+        "brier_score": round(total / n, 4) if n else 0.0,
+        "n_matches": n,
+        "breakdown": breakdown,
+    }
+
+
 if __name__ == "__main__":
     _run_demo()
 

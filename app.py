@@ -38,7 +38,7 @@ import polymarket
 from model import (
     EloEngine, TacticalEngine, PlayerMatchupEngine,
     PatternMatcher, NarrativeEngine, _load_historical_from_db,
-    build_2026_elo,
+    build_2026_elo, DixonColesEngine, save_prediction,
 )
 
 try:
@@ -628,6 +628,62 @@ _sync_thread_started = False
 
 LIVE_INTERVAL_SEC = 60
 IDLE_INTERVAL_SEC = 300
+PREDICT_WINDOW_HOURS = 2   # save a prediction within this window before kickoff
+
+
+def _run_due_predictions() -> int:
+    """Save a pre-kickoff prediction for any 2026 match kicking off within
+    PREDICT_WINDOW_HOURS, that doesn't already have one. Returns count saved."""
+    from datetime import datetime, timezone, timedelta
+
+    _ensure_engines()
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=PREDICT_WINDOW_HOURS)
+
+    conn = database.get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT m.id AS id, ht.name AS home, at.name AS away,
+                   m.kickoff_utc AS k, m.group_name AS grp
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.season = 2026 AND m.status = 'scheduled'
+              AND m.id NOT IN (SELECT match_id FROM predictions)
+        """).fetchall()
+
+        dc = DixonColesEngine()
+        saved = 0
+        for r in rows:
+            k = r["k"]
+            if not k:
+                continue
+            try:
+                ko = datetime.fromisoformat(str(k).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ko.tzinfo is None:
+                ko = ko.replace(tzinfo=timezone.utc)
+            if not (now <= ko <= horizon):
+                continue
+
+            home, away = r["home"], r["away"]
+            pred = dc.predict_from_db(
+                home, away,
+                home_elo=_elo.get_rating(home),
+                away_elo=_elo.get_rating(away),
+                group_name=r["grp"],
+            )
+            wdl = pred["win_draw_loss"]
+            save_prediction(r["id"], wdl["home_win"], wdl["draw"], wdl["away_win"],
+                            model_version="v1", conn=conn)
+            saved += 1
+
+        if saved:
+            conn.commit()
+        return saved
+    finally:
+        conn.close()
 
 
 def _live_sync_loop() -> None:
@@ -660,6 +716,14 @@ def _live_sync_loop() -> None:
                 # _ensure_engines). GIL makes this assignment atomic.
                 _elo = None
                 print("[sync] ELO invalidated; rebuilds on next prediction", flush=True)
+
+            # Save pre-kickoff predictions for matches starting soon.
+            try:
+                n_pred = _run_due_predictions()
+                if n_pred:
+                    print(f"[sync] saved {n_pred} pre-kickoff predictions", flush=True)
+            except Exception as e:
+                print(f"[sync] prediction error: {e}", file=sys.stderr, flush=True)
 
             interval = LIVE_INTERVAL_SEC if result.get("in_progress", 0) > 0 else IDLE_INTERVAL_SEC
         except Exception as e:
