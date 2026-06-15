@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import traceback
@@ -423,7 +424,7 @@ TEAM_FLAGS = {
 }
 
 
-EST = timezone(timedelta(hours=-5))   # fixed UTC-5 per spec (note: June is EDT/UTC-4)
+EASTERN = ZoneInfo("America/New_York")   # DST-aware: EST (UTC-5) winter, EDT (UTC-4) summer
 
 
 def _flag(name):
@@ -434,7 +435,7 @@ def _flag(name):
 
 
 def _est_dt(iso):
-    """Parse a UTC kickoff string and convert to EST (fixed UTC-5)."""
+    """Parse a UTC kickoff string and convert to US Eastern (DST-aware)."""
     if not iso:
         return None
     try:
@@ -443,12 +444,18 @@ def _est_dt(iso):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(EST)
+    return dt.astimezone(EASTERN)
 
 
 def _est_time(iso):
     dt = _est_dt(iso)
     return dt.strftime("%H:%M") if dt else ""
+
+
+def _est_label(iso):
+    """Eastern timezone abbreviation for the given instant ('EST' or 'EDT')."""
+    dt = _est_dt(iso)
+    return dt.tzname() if dt else "EST"
 
 
 def generate_model_edge(b) -> dict:
@@ -599,7 +606,7 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
         if is_post:
             ctx_parts.append("FULL TIME")
         elif time_str:
-            ctx_parts.append(f"{time_str} EST")
+            ctx_parts.append(f"{time_str} {_est_label(kickoff)}")
         ctx_line = " · ".join(ctx_parts)
 
         scorelines = pred["top_scorelines"][:5]
@@ -663,57 +670,57 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                 print(f"[match] predictions lookup failed for {match_id}: {e}",
                       file=sys.stderr, flush=True)
 
+            # CORRECT/INCORRECT, Brier, and the structured review are only
+            # meaningful when a real pre-kickoff prediction was saved. Without one
+            # a post-result recompute would fabricate a "prediction" the model
+            # never committed to, so there is nothing to score — the page shows
+            # "No prediction recorded" instead.
+            b["has_prediction"] = bool(prow)
             if prow:
                 pp1, ppd, pp2 = prow["home_win_pct"], prow["draw_pct"], prow["away_win_pct"]
-                has_saved = True
-            else:
-                pp1, ppd, pp2 = wdl["home_win"], wdl["draw"], wdl["away_win"]
-                has_saved = False
-            b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
+                b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
 
-            # POST-MATCH shows the PRE-KICKOFF odds (saved snapshot), not the
-            # post-result recompute. Override the top probability bar.
-            if has_saved:
+                # POST-MATCH shows the PRE-KICKOFF odds (saved snapshot), not the
+                # post-result recompute. Override the top probability bar.
                 b["p1"], b["pdraw"], b["p2"] = round(pp1), round(ppd), round(pp2)
 
-            # Prefer the edge snapshot stored at prediction time; fall back to the
-            # recomputed model_edge if this prediction predates the snapshot feature.
-            if prow and prow["suggested_bet"]:
-                txg = prow["total_xg"]
-                b["model_edge"] = {
-                    "suggested_bet": prow["suggested_bet"],
-                    "draw_edge": float(prow["draw_edge"]) if prow["draw_edge"] is not None else 0.0,
-                    "total_xg": float(txg) if txg is not None else 0.0,
-                    "under_lean": (float(txg) < 2.5) if txg is not None else False,
-                }
+                # Prefer the edge snapshot stored at prediction time; fall back to
+                # the recomputed model_edge if the prediction predates the snapshot.
+                if prow["suggested_bet"]:
+                    txg = prow["total_xg"]
+                    b["model_edge"] = {
+                        "suggested_bet": prow["suggested_bet"],
+                        "draw_edge": float(prow["draw_edge"]) if prow["draw_edge"] is not None else 0.0,
+                        "total_xg": float(txg) if txg is not None else 0.0,
+                        "under_lean": (float(txg) < 2.5) if txg is not None else False,
+                    }
 
-            # Predicted winner follows the MODEL EDGE signal (parsed from its
-            # suggested_bet string), falling back to highest probability when the
-            # edge is non-directional ("No clear edge" / "UNDER 2.5").
-            sb = b["model_edge"]["suggested_bet"]
-            if sb.startswith("DRAW"):
-                predicted_winner = "Draw"
-            elif sb.startswith(f"{t1} WIN"):
-                predicted_winner = t1
-            elif sb.startswith(f"{t2} WIN"):
-                predicted_winner = t2
-            else:
-                predicted_winner = max(
-                    [(pp1, t1), (ppd, "Draw"), (pp2, t2)], key=lambda x: x[0]
-                )[1]
-            b["predicted_winner"] = predicted_winner
-            b["prediction_correct"] = (predicted_winner == actual_winner)
+                # Predicted winner follows the MODEL EDGE signal (parsed from its
+                # suggested_bet string), falling back to highest probability when
+                # the edge is non-directional ("No clear edge" / "UNDER 2.5").
+                sb = b["model_edge"]["suggested_bet"]
+                if sb.startswith("DRAW"):
+                    predicted_winner = "Draw"
+                elif sb.startswith(f"{t1} WIN"):
+                    predicted_winner = t1
+                elif sb.startswith(f"{t2} WIN"):
+                    predicted_winner = t2
+                else:
+                    predicted_winner = max(
+                        [(pp1, t1), (ppd, "Draw"), (pp2, t2)], key=lambda x: x[0]
+                    )[1]
+                b["predicted_winner"] = predicted_winner
+                b["prediction_correct"] = (predicted_winner == actual_winner)
 
-            if has_saved:
                 a1 = 1.0 if actual_winner == t1 else 0.0
                 ad = 1.0 if actual_winner == "Draw" else 0.0
                 a2 = 1.0 if actual_winner == t2 else 0.0
                 b["brier"] = round(
                     (pp1 / 100 - a1) ** 2 + (ppd / 100 - ad) ** 2 + (pp2 / 100 - a2) ** 2, 2
                 )
+                b["narrative_post"] = generate_post_match_review(b)
             else:
                 b["brier"] = None
-            b["narrative_post"] = generate_post_match_review(b)
 
         return b
     finally:
@@ -762,7 +769,7 @@ def _load_match_from_db_or_api(match_id: int) -> Optional[dict]:
 @app.route("/")
 def index():
     _ensure_engines()
-    est_now = datetime.now(timezone.utc).astimezone(EST)
+    est_now = datetime.now(timezone.utc).astimezone(EASTERN)
     today = est_now.date()
     today_str = today.isoformat()
     earliest_str = (today - timedelta(days=6)).isoformat()
@@ -806,7 +813,7 @@ def index():
         elif is_live:
             meta, state = "LIVE", "live"
         else:
-            meta, state = f"{time_str} EST", ""
+            meta, state = f"{time_str} {est.tzname()}", ""
         by_date.setdefault(d, []).append({
             "id": r["id"],
             "teams": f"{_flag(r['t1'])} {r['t1']} vs {_flag(r['t2'])} {r['t2']}",
@@ -849,6 +856,7 @@ def index():
                 "xg1": eg["home"], "xg2": eg["away"], "note": note,
                 "group": (grp or "").upper(),
                 "time": _est_time(k),
+                "tz": _est_label(k),
                 "is_live": st in {"live", "in_progress"},
             })
         except Exception as e:

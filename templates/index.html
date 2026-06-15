@@ -35,7 +35,7 @@
                 <div class="mc-meta">
                     <span class="grp">{{ m.group }}</span>
                     {% if m.is_live %}<span class="badge live">LIVE</span>
-                    {% else %}<span class="badge">{{ m.time }} EST</span>{% endif %}
+                    {% else %}<span class="badge">{{ m.time }} {{ m.tz }}</span>{% endif %}
                 </div>
 
                 <div class="mc-teams">

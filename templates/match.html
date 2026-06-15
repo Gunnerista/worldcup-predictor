@@ -51,6 +51,7 @@
     {% if phase == 'post' %}
     <!-- ================= POST-MATCH ================= -->
 
+    {% if bundle.has_prediction %}
     <section class="section">
         <h2>Prediction vs Result</h2>
         <div class="pvr">
@@ -121,6 +122,16 @@
             {% endif %}
         </div>
     </section>
+    {% else %}
+    <section class="section">
+        <h2>Prediction vs Result</h2>
+        <div class="verdict"><span class="muted">No prediction recorded for this match.</span></div>
+        <p class="narrative" style="margin-top:8px">No pre-kickoff prediction was saved before this match started, so there is no forecast to score. Predictions are stored automatically up to 2 hours before kickoff.</p>
+        {% if bundle.season_record %}
+        <div class="season-record">SEASON RECORD: {{ bundle.season_record.correct }}/{{ bundle.season_record.total }} CORRECT ({{ bundle.season_record.pct }}%)</div>
+        {% endif %}
+    </section>
+    {% endif %}
 
     {% else %}
     <!-- ================= PRE-MATCH ================= -->
