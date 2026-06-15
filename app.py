@@ -721,6 +721,10 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                 b["narrative_post"] = generate_post_match_review(b)
             else:
                 b["brier"] = None
+                # No saved snapshot: the top "Pre-Match Odds" bar must NEVER show
+                # a post-result recompute (current ELO already reflects the result).
+                # Null the odds so the template renders nothing instead.
+                b["p1"] = b["pdraw"] = b["p2"] = None
 
         return b
     finally:

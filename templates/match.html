@@ -22,7 +22,9 @@
         {% endif %}
     </div>
 
-    <!-- probability bar -->
+    <!-- probability bar: PRE shows the live model; POST shows ONLY the saved
+         pre-kickoff snapshot, never a post-result recompute -->
+    {% if phase != 'post' or bundle.has_prediction %}
     {% if phase == 'post' %}<div class="label" style="margin-bottom:6px">Pre-Match Odds</div>{% endif %}
     <div class="prob-bar">
         <div class="pb-row r1">
@@ -47,6 +49,7 @@
             <span class="pct">{{ bundle.p2 }}%</span>
         </div>
     </div>
+    {% endif %}
 
     {% if phase == 'post' %}
     <!-- ================= POST-MATCH ================= -->
