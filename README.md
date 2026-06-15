@@ -22,6 +22,16 @@ Statistical match outcome prediction system for the 2026 FIFA World Cup. Impleme
 | Matches tracked | 104 (full tournament) |
 | Brier Score | Updating live — see `/api/brier` |
 
+## Screenshots
+
+> Pre-match analysis — Belgium vs Egypt
+
+![MATCHIQ Pre-match](https://worldcup-predictor-production-c55a.up.railway.app/static/screenshot_prematch.png)
+
+> Post-match review — Germany vs Curaçao
+
+![MATCHIQ Post-match](https://worldcup-predictor-production-c55a.up.railway.app/static/screenshot_postmatch.png)
+
 ## Mathematical Model
 
 The core model computes joint scoreline probabilities using Dixon-Coles bivariate Poisson:
