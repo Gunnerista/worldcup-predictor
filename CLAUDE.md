@@ -35,6 +35,14 @@
 - **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
 - **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, EST 시간.
 
+### 3.1 마지막 세션 인수인계 (2026-06-15)
+이번 세션에서 한 것: MATCHIQ 리브랜드 → DixonColes/GroupSituation/user_notes 웹 연결 → 예측추적+Brier+SEASON RECORD → 국기(Twemoji)/EST/색상 → MODEL EDGE(PRE+POST "Pre-Match Signal") → predicted_winner를 model edge 기준으로 → **predictions에 edge 스냅샷 컬럼 추가** → POST 상단 "Pre-Match Odds"(저장값) 표시 → 오염 예측(match 14, 88.6% Belgium, 캘리브레이션 이전 저장) **로컬 SQLite에서 삭제** (predictions 현재 **0건, clean**).
+
+**⚠️ 즉시 할 일 (미완):**
+- **Railway PG에서 `DELETE FROM predictions WHERE match_id=14`** — 로컬만 지웠음. 운영자가 Railway 대시보드 Query 또는 `DATABASE_URL` 세팅 후 직접 실행해야 함 (이 dev 환경엔 DATABASE_URL 없어 접근 불가). 없으면 `deleted: 0`(원래 없었음)일 수도 — 어느 쪽이든 안전.
+- **EST vs EDT 결정** (§11.6): 현재 UTC-5, 6~7월 실제는 UTC-4.
+- README 스크린샷 2개는 커밋됨(`static/screenshot_*.png`).
+
 ---
 
 ## 4. 기술 스택 (실제)
@@ -102,9 +110,13 @@
 - `build_2026_elo()`가 이 시드 위에 2026 완료 경기 replay (stage-aware K: group 20 / R32 30 / QF 40 / SF·F 50).
 - app.py `_build_live_elo_2026()`가 시드 baseline + build_2026_elo 결과 overlay.
 
-### 6.3 예측 추적 (`model.py`)
-- **`save_prediction()`** — predictions 테이블에 킥오프 전 예측 저장.
+### 6.3 예측 추적 (`model.py` + `app.py`)
+- **`save_prediction()`** — predictions에 킥오프 전 예측 저장. **edge 스냅샷도 저장**: `suggested_bet`/`draw_edge`/`total_xg` 컬럼 (database.py `_ensure_prediction_edge_columns()`가 init_db에서 idempotent ALTER — 기존 DB도 자동 추가).
 - **`compute_brier_score(season=2026)`** — 완료+예측 경기 멀티클래스 Brier `Σ(p−o)²`.
+- **predicted_winner는 MODEL EDGE 규칙으로 결정** (단순 최고확률 아님): `draw_edge(=pdraw−26)>5 → DRAW`, `p1>55 → team1`, `p2>55 → team2`, 그 외(UNDER 2.5/No clear edge) → 최고확률 fallback. POST는 저장된 `suggested_bet` 문자열을 파싱해서 사용(없으면 재계산). `_season_record()`도 같은 규칙(확률 기반)이라 결과 수렴.
+- **POST-MATCH 표시 = 경기 전 값.** 상단 확률 바 "Pre-Match Odds"(저장 스냅샷), "Pre-Match Signal"(저장 model_edge). 둘 다 저장값 우선, 없으면 현재 재계산 fallback. 완료 경기는 ELO가 결과 반영 후라 재계산값은 진짜 pre-kickoff와 다를 수 있음 → 스냅샷이 정답.
+- **`/api/brier`** 라우트 = `{brier_score, n_matches}`.
+- **`_run_due_predictions()`** (app.py 백그라운드) — scheduled + 킥오프 2h 전 + 예측 없는 경기만 저장. **이미 in_progress/completed면 재예측 안 함** (한 번 놓치면 그 경기는 예측 없이 끝남).
 
 ---
 
@@ -250,13 +262,15 @@ FLASK_DEBUG=True
 - [x] **POST-MATCH 페이지 + 예측 추적 (save_prediction/compute_brier_score/`/api/brier`/SEASON RECORD)**
 - [x] **user_notes → 모델 λ 반영** (`apply_user_notes`, app.py `_load_user_notes`)
 - [x] **MATCHIQ 리브랜드** (영어 UI, 사이드바, PRE/POST, 국기, EST, MODEL EDGE, 구조화 리뷰)
-- [x] README.md (방법론/아키텍처) + 스크린샷
+- [x] **edge 스냅샷** (predictions에 suggested_bet/draw_edge/total_xg) + predicted_winner를 model edge 기준으로 + POST "Pre-Match Odds/Signal"
+- [x] README.md (방법론/아키텍처) + 스크린샷 커밋
 - [x] Railway 배포
 
 미완 / 다음:
+- [ ] **★ Railway PG `DELETE FROM predictions WHERE match_id=14`** — 로컬은 삭제됨, Railway는 운영자 직접 (§3.1)
 - [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py`) — 또는 백그라운드 sync가 채우게 (운영자 확인 필요)
 - [ ] **EST vs EDT 결정** (§11.6) — 현재 UTC-5, 6~7월 실제는 UTC-4
-- [ ] **SEASON RECORD가 0/0** — 기존 완료 경기는 예측저장 기능 이전 종료라 채점 대상 없음. 앞으로 킥오프 전 저장된 경기부터 채워짐
+- [ ] **SEASON RECORD** — 로컬 predictions 0건(clean)으로 리셋됨. 앞으로 킥오프 전 저장되는 깨끗한 예측(캘리브레이션된 모델 + edge 스냅샷)부터 채워짐
 - [ ] LIVE phase 실시간 푸시 (현재 60s DB 폴링 + 백그라운드 sync)
 - [ ] Monte Carlo 토너먼트 진출 시뮬레이션 (3위 cross-group 컷 포함)
 - [ ] 모바일 QA + style.css 폴리시 (새 클래스 일부 CSS 없이 인라인만 적용된 곳 있음)
