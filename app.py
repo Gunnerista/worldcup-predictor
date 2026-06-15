@@ -23,10 +23,13 @@ import time
 from datetime import date
 from typing import Optional
 
+import traceback
+
 from flask import (
     Flask, render_template, request, Response,
     redirect, url_for, abort,
 )
+from werkzeug.exceptions import HTTPException
 
 import database
 import data_pipeline
@@ -46,6 +49,30 @@ app = Flask(__name__)
 # Ensure the SQLite schema exists at import time (runs under gunicorn too,
 # not just `python app.py`). Idempotent: CREATE TABLE IF NOT EXISTS.
 database.init_db()
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected(e):
+    """Catch every unhandled exception, dump traceback to stderr (Railway logs
+    pick this up), and optionally render it in the browser if DEBUG_TRACEBACK=1.
+
+    HTTP exceptions (404, 405, etc.) are passed through unchanged.
+    """
+    if isinstance(e, HTTPException):
+        return e
+    tb = traceback.format_exc()
+    print(f"\n!!! UNHANDLED EXCEPTION in {request.method} {request.path}\n{tb}",
+          file=sys.stderr, flush=True)
+    if os.environ.get("DEBUG_TRACEBACK", "").strip() in ("1", "true", "yes"):
+        # Show real error to the user — only enable temporarily for diagnosis.
+        body = (
+            f"<h1>Internal Server Error</h1>"
+            f"<h2>{type(e).__name__}: {e}</h2>"
+            f"<pre style='background:#161b22;color:#e6edf3;padding:16px;"
+            f"border-radius:8px;overflow:auto'>{tb}</pre>"
+        )
+        return body, 500
+    return ("Internal Server Error", 500)
 
 # --------------------------------------------------------------------------
 # Engine state (warmed on first request)
