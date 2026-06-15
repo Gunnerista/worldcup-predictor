@@ -1,9 +1,4 @@
 flask
-flask-cors
 python-dotenv
 requests
-xgboost
-scikit-learn
-numpy
-pandas
 gunicorn

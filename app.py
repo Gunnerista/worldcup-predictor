@@ -43,6 +43,10 @@ except Exception:
 
 app = Flask(__name__)
 
+# Ensure the SQLite schema exists at import time (runs under gunicorn too,
+# not just `python app.py`). Idempotent: CREATE TABLE IF NOT EXISTS.
+database.init_db()
+
 # --------------------------------------------------------------------------
 # Engine state (warmed on first request)
 # --------------------------------------------------------------------------
@@ -549,6 +553,5 @@ def save_notes(match_id: int):
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    database.init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
