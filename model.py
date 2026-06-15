@@ -1656,8 +1656,8 @@ class DixonColesEngine:
 
         notes_dict keys (all optional):
           key_player_out : list of names -> -0.08 each, total capped at -0.25
-          tactical_note  : str           -> -0.10 if it contains "수비",
-                                            +0.08 if it contains "공격"
+          tactical_note  : str           -> -0.10 if it mentions "defensive",
+                                            +0.08 if it mentions "attacking"
           condition      : "negative" -> -0.07 | "positive" -> +0.07 | else 0
 
         Returns the adjusted λ, clamped to [0.3, 3.0]. team_name is accepted for
@@ -1672,10 +1672,10 @@ class DixonColesEngine:
         if out:
             lam += max(-0.25, -0.08 * len(out))
 
-        tac = notes_dict.get("tactical_note") or ""
-        if "수비" in tac:
+        tac = (notes_dict.get("tactical_note") or "").lower()
+        if any(k in tac for k in ("defensive", "defend", "low block", "park the bus")):
             lam -= 0.10
-        if "공격" in tac:
+        if any(k in tac for k in ("attacking", "attack", "high press", "front foot")):
             lam += 0.08
 
         cond = notes_dict.get("condition")
@@ -2054,7 +2054,7 @@ class GroupSituationEngine:
         target = next((t for t in teams
                        if t == team_name or t.lower() == team_name.lower()), None)
         if target is None:
-            return self._mk("live", 1.0, False, "해당 조에서 팀을 찾을 수 없음")
+            return self._mk("live", 1.0, False, "Team not in this group")
 
         completed = [m for m in matches if self._is_completed(m)]
         remaining = [m for m in matches if not self._is_completed(m)]
@@ -2078,10 +2078,10 @@ class GroupSituationEngine:
         if rem_count <= 0:
             posset = position_in(completed)
             if max(posset) <= 2:
-                return self._mk("already_qualified", 0.75, False, "조별리그 통과 확정")
+                return self._mk("already_qualified", 0.75, False, "Qualification secured")
             if min(posset) >= last_place:
-                return self._mk("already_eliminated", 0.88, False, "탈락 확정")
-            return self._mk("live", 1.0, (3 in posset), "3위 — 타 조 결과 대기")
+                return self._mk("already_eliminated", 0.88, False, "Eliminated")
+            return self._mk("live", 1.0, (3 in posset), "3rd place — awaiting other groups")
 
         # Enumerate remaining group fixtures with canonical scorelines.
         rem_fixtures = [(m["home"], m["away"]) for m in remaining]
@@ -2128,18 +2128,18 @@ class GroupSituationEngine:
         can_reach_top2 = bool(all_pos) and min(all_pos) <= 2
 
         if guaranteed_top2(all_pos):
-            return self._mk("already_qualified", 0.75, can_third, "조별리그 통과 확정")
+            return self._mk("already_qualified", 0.75, can_third, "Qualification secured")
         if not alive(all_pos):
-            return self._mk("already_eliminated", 0.88, False, "탈락 확정")
+            return self._mk("already_eliminated", 0.88, False, "Eliminated")
         if guaranteed_top2(draw_pos):
-            return self._mk("draw_enough", 0.87, can_third, "다음 경기 비기면 32강 진출 확정")
+            return self._mk("draw_enough", 0.87, can_third, "A draw secures qualification")
         if alive(win_pos) and not alive(draw_pos) and not alive(loss_pos):
-            return self._mk("must_win", 1.20, can_third, "반드시 이겨야 생존")
+            return self._mk("must_win", 1.20, can_third, "Must win to survive")
         # "Third only" applies when top 2 is no longer reachable but a draw
         # keeps a third-place path alive. Leaders still chasing top 2 stay live.
         if not can_reach_top2 and can_third and alive(draw_pos):
-            return self._mk("live", 0.90, True, "비겨도 3위로 진출 가능 (2위 진입 불가)")
-        return self._mk("live", 1.0, can_third, "진출 경쟁 중")
+            return self._mk("live", 0.90, True, "Can advance as third place (top-2 out of reach)")
+        return self._mk("live", 1.0, can_third, "Qualification open")
 
 
 def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str, float]]:

@@ -26,17 +26,17 @@
     <div class="prob-bar">
         <div class="pb-row r1">
             <span class="name">{{ bundle.team1 }}</span>
-            <span class="pb-track"><span class="pb-fill f1" style="width: {{ bundle.p1 }}%"></span></span>
+            <span class="pb-track"><span class="pb-fill f1 prob-bar-team1" style="width: {{ bundle.p1 }}%; background:#1D9E75"></span></span>
             <span class="pct">{{ bundle.p1 }}%</span>
         </div>
         <div class="pb-row rd">
             <span class="name">Draw</span>
-            <span class="pb-track"><span class="pb-fill fd" style="width: {{ bundle.pdraw }}%"></span></span>
+            <span class="pb-track"><span class="pb-fill fd prob-bar-draw" style="width: {{ bundle.pdraw }}%; background:#4a5568"></span></span>
             <span class="pct">{{ bundle.pdraw }}%</span>
         </div>
         <div class="pb-row r2">
             <span class="name">{{ bundle.team2 }}</span>
-            <span class="pb-track"><span class="pb-fill f2" style="width: {{ bundle.p2 }}%"></span></span>
+            <span class="pb-track"><span class="pb-fill f2 prob-bar-team2" style="width: {{ bundle.p2 }}%; background:#378ADD"></span></span>
             <span class="pct">{{ bundle.p2 }}%</span>
         </div>
     </div>
@@ -116,13 +116,13 @@ P(0-0) = {{ '%.4f'|format(bundle.p00) }}   P(1-0) = {{ '%.4f'|format(bundle.p10)
             <div class="sg-row k">ELO</div>
             <div class="sg-row v2">{{ bundle.strength2.elo }}</div>
 
-            <div class="sg-row v1">{% if bundle.strength1.xg_for is not none %}{{ '%.2f'|format(bundle.strength1.xg_for) }}{% else %}—{% endif %}</div>
+            <div class="sg-row v1">{% if bundle.strength1.xg_for is not none %}{{ '%.2f'|format(bundle.strength1.xg_for) }}{% else %}<span class="na" title="No expected-goals data on record yet (2018 World Cup had no team xG)">N/A</span>{% endif %}</div>
             <div class="sg-row k">xG For</div>
-            <div class="sg-row v2">{% if bundle.strength2.xg_for is not none %}{{ '%.2f'|format(bundle.strength2.xg_for) }}{% else %}—{% endif %}</div>
+            <div class="sg-row v2">{% if bundle.strength2.xg_for is not none %}{{ '%.2f'|format(bundle.strength2.xg_for) }}{% else %}<span class="na" title="No expected-goals data on record yet (2018 World Cup had no team xG)">N/A</span>{% endif %}</div>
 
-            <div class="sg-row v1">{% if bundle.strength1.xg_against is not none %}{{ '%.2f'|format(bundle.strength1.xg_against) }}{% else %}—{% endif %}</div>
+            <div class="sg-row v1">{% if bundle.strength1.xg_against is not none %}{{ '%.2f'|format(bundle.strength1.xg_against) }}{% else %}<span class="na" title="No expected-goals data on record yet (2018 World Cup had no team xG)">N/A</span>{% endif %}</div>
             <div class="sg-row k">xG Against</div>
-            <div class="sg-row v2">{% if bundle.strength2.xg_against is not none %}{{ '%.2f'|format(bundle.strength2.xg_against) }}{% else %}—{% endif %}</div>
+            <div class="sg-row v2">{% if bundle.strength2.xg_against is not none %}{{ '%.2f'|format(bundle.strength2.xg_against) }}{% else %}<span class="na" title="No expected-goals data on record yet (2018 World Cup had no team xG)">N/A</span>{% endif %}</div>
 
             <div class="sg-row v1">{{ '%.2f'|format(bundle.strength1.attack) }}</div>
             <div class="sg-row k">Attack Str</div>

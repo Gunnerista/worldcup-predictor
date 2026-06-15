@@ -218,12 +218,12 @@ def _recent_team_stats(conn, team_name: str) -> dict:
 def _load_user_notes(conn, match_id):
     """Latest user_notes row -> a notes_dict for DixonColesEngine.apply_user_notes.
 
-    user_notes is free-text and per-match (no home/away split), so we map the
-    'tactics' text to tactical_note (the '수비'/'공격' keyword detector reads it)
-    and infer condition from 'player_condition' keywords. The note is attributed
-    to the HOME side (the team the report is centred on); away_notes stays None.
-    key_player_out can't be parsed from free text, so it is omitted.
-    Returns (home_notes, away_notes).
+    user_notes is free-text and per-match (no team1/team2 split), so we map the
+    'tactics' text to tactical_note (the 'defensive'/'attacking' keyword detector
+    reads it) and infer condition from 'player_condition' keywords. The note is
+    attributed to team1 (the side the report is centred on); the second team's
+    notes stay None. key_player_out can't be parsed from free text, so it is
+    omitted. Returns (team1_notes, team2_notes).
     """
     try:
         row = conn.execute(
@@ -237,12 +237,12 @@ def _load_user_notes(conn, match_id):
         return None, None
 
     tactics = (row["tactics"] or "").strip()
-    cond_text = (row["player_condition"] or "")
+    cond_text = (row["player_condition"] or "").lower()
     notes: dict = {}
     if tactics:
         notes["tactical_note"] = tactics
-    neg = any(k in cond_text for k in ("부상", "피로", "결장", "악화", "negative"))
-    pos = any(k in cond_text for k in ("호조", "최상", "정상", "positive"))
+    neg = any(k in cond_text for k in ("injury", "injured", "fatigue", "tired", "out", "doubt", "negative"))
+    pos = any(k in cond_text for k in ("fit", "sharp", "fresh", "back", "positive"))
     if neg and not pos:
         notes["condition"] = "negative"
     elif pos and not neg:
@@ -466,6 +466,7 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
         b["narrative_pre"] = generate_pre_match_narrative(b)
 
         if is_post:
+            # Score / actual winner are pure computations (always safe).
             hs = match.get("home_score") or 0
             as_ = match.get("away_score") or 0
             b["score"] = f"{hs} — {as_}"
@@ -474,15 +475,25 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             actual_winner = t1 if hs > as_ else (t2 if hs < as_ else "Draw")
             b["actual_winner"] = actual_winner
 
-            prow = conn.execute(
-                "SELECT home_win_pct, draw_pct, away_win_pct FROM predictions "
-                "WHERE match_id = ? ORDER BY created_at",
-                (match_id,),
-            ).fetchone()
+            # Saved pre-kickoff prediction (DB). Fall back to the current model
+            # if the lookup fails so a completed match never 500s; log the cause.
+            prow = None
+            try:
+                prow = conn.execute(
+                    "SELECT home_win_pct, draw_pct, away_win_pct FROM predictions "
+                    "WHERE match_id = ? ORDER BY created_at",
+                    (match_id,),
+                ).fetchone()
+            except Exception as e:
+                print(f"[match] predictions lookup failed for {match_id}: {e}",
+                      file=sys.stderr, flush=True)
+
             if prow:
                 pp1, ppd, pp2 = prow["home_win_pct"], prow["draw_pct"], prow["away_win_pct"]
+                has_saved = True
             else:
                 pp1, ppd, pp2 = wdl["home_win"], wdl["draw"], wdl["away_win"]
+                has_saved = False
             b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
 
             predicted_winner = max(
@@ -491,7 +502,7 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             b["predicted_winner"] = predicted_winner
             b["prediction_correct"] = (predicted_winner == actual_winner)
 
-            if prow:
+            if has_saved:
                 a1 = 1.0 if actual_winner == t1 else 0.0
                 ad = 1.0 if actual_winner == "Draw" else 0.0
                 a2 = 1.0 if actual_winner == t2 else 0.0
