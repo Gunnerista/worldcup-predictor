@@ -1501,6 +1501,7 @@ class DixonColesEngine:
         db_path: str = "worldcup.db",
         neutral_venue: bool = True,
         top_n: int = 5,
+        group_name: str | None = None,
     ) -> dict:
         """
         Like predict(), but auto-loads attack/defense strengths from the DB by
@@ -1526,6 +1527,21 @@ class DixonColesEngine:
         aa = (away["attack"]  if away is not None else 1.0) * away_adj
         ad =  away["defense"] if away is not None else 1.0
 
+        # Group-stage situation: each team's λ scaled by its motivation state.
+        sit_home = sit_away = None
+        if group_name:
+            gse = GroupSituationEngine()
+            try:
+                sit_home = gse.assess_situation(home_name, group_name)
+                ha *= sit_home["lambda_multiplier"]
+            except Exception:
+                sit_home = None
+            try:
+                sit_away = gse.assess_situation(away_name, group_name)
+                aa *= sit_away["lambda_multiplier"]
+            except Exception:
+                sit_away = None
+
         result = self.predict(
             home_elo=home_elo,
             away_elo=away_elo,
@@ -1544,6 +1560,7 @@ class DixonColesEngine:
             "home": round(home_adj, 3),
             "away": round(away_adj, 3),
         }
+        result["situation"] = {"home": sit_home, "away": sit_away}
         return result
 
     def format_report_kr(self, home_name: str, away_name: str, result: dict) -> str:
@@ -1577,6 +1594,349 @@ class DixonColesEngine:
             "=" * 55,
         ]
         return "\n".join(lines)
+
+
+# ===========================================================================
+# Engine 7: GroupSituationEngine — 2026 group standings + qualification logic
+# ===========================================================================
+#
+# 2026 FIFA World Cup format: 12 groups (A-L) of 4 teams. Top 2 of each group
+# plus the 8 best third-placed teams advance to the Round of 32.
+#
+# Group tiebreakers (in order):
+#   1) head-to-head points          2) head-to-head goal difference
+#   3) head-to-head goals scored    4) overall goal difference
+#   5) overall goals scored         6) fair play (cards)
+#   7) FIFA ranking
+# Best-third tiebreakers: points -> overall GD -> overall GF -> fair play ->
+# FIFA ranking.
+#
+# DATA LIMITATIONS (honest disclosure — see CLAUDE.md rules on no-hallucination):
+#   * Fair play uses TOTAL card count per team. The DB stores event_type='card'
+#     without the yellow/red subtype, so FIFA's weighted fair-play points cannot
+#     be computed. Fewer cards = better.
+#   * FIFA ranking is a static approximation (FIFA_RANKING below), used only as
+#     the final, rarely-decisive tiebreaker.
+#   * Tiebreakers 1-3 are applied once per equal-points cluster. FIFA's full
+#     recursive re-application (when h2h partially separates a 3+ way tie) is
+#     not modelled.
+#   * Qualification scenarios enumerate remaining fixtures with representative
+#     scorelines (win 2-0, draw 1-1, loss 0-2) so goal difference varies across
+#     scenarios. Exactly-tied teams are assigned a RANGE of possible finishing
+#     positions, so genuinely symmetric teams are treated symmetrically. The
+#     exact distribution of real scorelines is still an approximation.
+#   * "can_qualify_as_third" reflects whether a team can finish 3rd IN ITS GROUP.
+#     The cross-group "8 best thirds" cut needs all 12 groups complete and is
+#     not evaluated here.
+
+
+class GroupSituationEngine:
+    """2026 group standings + per-team qualification situation."""
+
+    # Approximate FIFA ranking (lower = better), ~June 2026. Final tiebreaker
+    # only; teams not listed default to a large rank (worse).
+    FIFA_RANKING: dict[str, int] = {
+        "Argentina": 1, "France": 2, "Spain": 3, "England": 4, "Brazil": 5,
+        "Netherlands": 6, "Portugal": 7, "Belgium": 8, "Italy": 9, "Germany": 10,
+        "Croatia": 11, "Morocco": 12, "Colombia": 13, "Uruguay": 14, "USA": 15,
+        "Mexico": 16, "Switzerland": 17, "Senegal": 18, "Japan": 19, "Denmark": 20,
+        "Iran": 21, "South Korea": 22, "Australia": 23, "Ecuador": 24,
+        "Austria": 25, "Canada": 26, "Poland": 27, "Serbia": 28, "Egypt": 29,
+        "Nigeria": 30, "Norway": 31, "Sweden": 32, "Czechia": 33, "South Africa": 34,
+    }
+    _RANK_DEFAULT = 99
+
+    @staticmethod
+    def _norm_group(group_name: str) -> str:
+        g = (group_name or "").strip()
+        if not g.lower().startswith("group"):
+            g = f"Group {g}"
+        return g
+
+    def _fifa_rank(self, team: str) -> int:
+        return self.FIFA_RANKING.get(team, self._RANK_DEFAULT)
+
+    # ---- DB collection ----------------------------------------------------
+
+    def _collect(self, group_name, season, conn):
+        """Return (matches, team_names, cards) for a group.
+
+        matches: [{"home","away","hs","as_","status"}, ...] (all matches)
+        team_names: sorted list of team names in the group
+        cards: {team_name: total_card_count}
+        """
+        # A caller-supplied raw sqlite3 connection may not have the Row factory;
+        # set it so column-name access works (no-op for PG's _PgConnection).
+        import sqlite3 as _sq
+        if isinstance(conn, _sq.Connection) and conn.row_factory is not _sq.Row:
+            conn.row_factory = _sq.Row
+
+        # Match the group whether stored as "Group A" (production) or "A" (e.g.
+        # synthetic/test data).
+        g_norm = self._norm_group(group_name)
+        g_raw = (group_name or "").strip()
+        group_vals = [g_norm] if g_raw == g_norm else [g_norm, g_raw]
+        ph = ",".join("?" for _ in group_vals)
+
+        matches = []
+        for r in conn.execute(
+            f"""
+            SELECT ht.name AS home, at.name AS away,
+                   m.home_score AS hs, m.away_score AS as_, m.status AS status
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.season = ? AND m.group_name IN ({ph})
+            ORDER BY m.kickoff_utc
+            """,
+            (season, *group_vals),
+        ).fetchall():
+            matches.append({
+                "home": r["home"], "away": r["away"],
+                "hs": r["hs"], "as_": r["as_"], "status": r["status"],
+            })
+
+        teams = sorted({m["home"] for m in matches} | {m["away"] for m in matches})
+
+        cards = {t: 0 for t in teams}
+        try:
+            for r in conn.execute(
+                f"""
+                SELECT t.name AS name, COUNT(*) AS c
+                FROM match_events me
+                JOIN matches m ON m.id = me.match_id
+                JOIN teams t   ON t.id = me.team_id
+                WHERE m.season = ? AND m.group_name IN ({ph})
+                  AND me.event_type = 'card'
+                GROUP BY t.id, t.name
+                """,
+                (season, *group_vals),
+            ).fetchall():
+                if r["name"] in cards:
+                    cards[r["name"]] = r["c"]
+        except Exception:
+            # match_events may be absent (partial/test DB) -> treat as 0 cards.
+            pass
+
+        return matches, teams, cards
+
+    @staticmethod
+    def _is_completed(m) -> bool:
+        return m["hs"] is not None and m["as_"] is not None
+
+    # ---- Standings computation -------------------------------------------
+
+    def _stats_from_results(self, teams, results, cards):
+        st = {t: {"team": t, "points": 0, "gf": 0, "ga": 0, "gd": 0,
+                  "played": 0, "cards": cards.get(t, 0)} for t in teams}
+        for m in results:
+            h, a, hs, as_ = m["home"], m["away"], m["hs"], m["as_"]
+            if h not in st or a not in st:
+                continue
+            st[h]["played"] += 1
+            st[a]["played"] += 1
+            st[h]["gf"] += hs
+            st[h]["ga"] += as_
+            st[a]["gf"] += as_
+            st[a]["ga"] += hs
+            if hs > as_:
+                st[h]["points"] += 3
+            elif hs < as_:
+                st[a]["points"] += 3
+            else:
+                st[h]["points"] += 1
+                st[a]["points"] += 1
+        for t in st.values():
+            t["gd"] = t["gf"] - t["ga"]
+        return st
+
+    def _h2h(self, cluster_names, results):
+        """Head-to-head mini stats among cluster teams (completed only)."""
+        h = {t: {"points": 0, "gf": 0, "ga": 0, "gd": 0} for t in cluster_names}
+        cs = set(cluster_names)
+        for m in results:
+            home, away, hs, as_ = m["home"], m["away"], m["hs"], m["as_"]
+            if home in cs and away in cs:
+                h[home]["gf"] += hs
+                h[home]["ga"] += as_
+                h[away]["gf"] += as_
+                h[away]["ga"] += hs
+                if hs > as_:
+                    h[home]["points"] += 3
+                elif hs < as_:
+                    h[away]["points"] += 3
+                else:
+                    h[home]["points"] += 1
+                    h[away]["points"] += 1
+        for t in h.values():
+            t["gd"] = t["gf"] - t["ga"]
+        return h
+
+    def _rank(self, teams, results, cards):
+        """Ordered list of stat dicts applying the full tiebreaker chain.
+
+        Each returned dict carries a "_key" tuple that fully determines its
+        order (higher = better). Two teams with an identical "_key" are exactly
+        tied — assess_situation uses this to treat their finishing position as a
+        range, so genuinely symmetric teams are handled symmetrically.
+        """
+        st = self._stats_from_results(teams, results, cards)
+        order = list(st.values())
+        order.sort(key=lambda t: t["points"], reverse=True)
+
+        resolved = []
+        i = 0
+        while i < len(order):
+            j = i
+            while j < len(order) and order[j]["points"] == order[i]["points"]:
+                j += 1
+            cluster = order[i:j]
+            names = [t["team"] for t in cluster]
+            h2h = self._h2h(names, results) if len(cluster) > 1 else {}
+            for t in cluster:
+                hh = h2h.get(t["team"], {"points": 0, "gd": 0, "gf": 0})
+                t["_key"] = (
+                    t["points"],
+                    hh["points"], hh["gd"], hh["gf"],   # head-to-head 1-3
+                    t["gd"], t["gf"],                    # overall 4-5
+                    -t["cards"],                         # fair play (fewer better)
+                    -self._fifa_rank(t["team"]),         # FIFA rank (lower better)
+                )
+            cluster.sort(key=lambda t: t["_key"], reverse=True)
+            resolved.extend(cluster)
+            i = j
+        return resolved
+
+    # ---- Public: standings -----------------------------------------------
+
+    def get_group_standings(self, group_name, season=2026, conn=None):
+        own = conn is None
+        if own:
+            import database
+            conn = database.get_connection()
+        try:
+            matches, teams, cards = self._collect(group_name, season, conn)
+        finally:
+            if own:
+                conn.close()
+        completed = [m for m in matches if self._is_completed(m)]
+        ranked = self._rank(teams, completed, cards)
+        return [{
+            "team": t["team"], "points": t["points"], "gd": t["gd"],
+            "gf": t["gf"], "played": t["played"], "ga": t["ga"],
+        } for t in ranked]
+
+    # ---- Public: situation -----------------------------------------------
+
+    def _mk(self, status, lam, can_third, note):
+        return {
+            "status": status,
+            "can_qualify_as_third": bool(can_third),
+            "lambda_multiplier": lam,
+            "note": note,
+        }
+
+    def assess_situation(self, team_name, group_name, season=2026, conn=None):
+        own = conn is None
+        if own:
+            import database
+            conn = database.get_connection()
+        try:
+            matches, teams, cards = self._collect(group_name, season, conn)
+        finally:
+            if own:
+                conn.close()
+
+        # Resolve team name case-insensitively against the group.
+        target = next((t for t in teams
+                       if t == team_name or t.lower() == team_name.lower()), None)
+        if target is None:
+            return self._mk("live", 1.0, False, "해당 조에서 팀을 찾을 수 없음")
+
+        completed = [m for m in matches if self._is_completed(m)]
+        remaining = [m for m in matches if not self._is_completed(m)]
+        team_total = max(0, len(teams) - 1)   # round-robin: each plays n-1
+        played = sum(1 for m in completed if target in (m["home"], m["away"]))
+        rem_count = team_total - played
+        last_place = len(teams)
+
+        def position_in(results):
+            """Set of possible finishing positions for the target. Exactly-tied
+            teams share the full range their tie spans."""
+            ranked = self._rank(teams, results, cards)
+            tkey = next((t["_key"] for t in ranked if t["team"] == target), None)
+            if tkey is None:
+                return {last_place}
+            above = sum(1 for t in ranked if t["_key"] > tkey)
+            tied = sum(1 for t in ranked if t["_key"] == tkey)
+            return set(range(above + 1, above + tied + 1))
+
+        # No games left -> deterministic (modulo unbroken exact ties).
+        if rem_count <= 0:
+            posset = position_in(completed)
+            if max(posset) <= 2:
+                return self._mk("already_qualified", 0.75, False, "조별리그 통과 확정")
+            if min(posset) >= last_place:
+                return self._mk("already_eliminated", 0.88, False, "탈락 확정")
+            return self._mk("live", 1.0, (3 in posset), "3위 — 타 조 결과 대기")
+
+        # Enumerate remaining group fixtures with canonical scorelines.
+        rem_fixtures = [(m["home"], m["away"]) for m in remaining]
+        next_idx = next((i for i, (h, a) in enumerate(rem_fixtures)
+                         if target in (h, a)), None)
+
+        import itertools
+
+        # Representative scorelines so goal difference varies across scenarios
+        # (canonical 1-0/0-0 erased GD signal and caused symmetry artifacts).
+        def synth(home, away, o):
+            if o == "H":
+                return {"home": home, "away": away, "hs": 2, "as_": 0}
+            if o == "A":
+                return {"home": home, "away": away, "hs": 0, "as_": 2}
+            return {"home": home, "away": away, "hs": 1, "as_": 1}
+
+        all_pos, draw_pos, win_pos, loss_pos = set(), set(), set(), set()
+        for combo in itertools.product(("H", "D", "A"), repeat=len(rem_fixtures)):
+            sim = completed + [
+                synth(rem_fixtures[i][0], rem_fixtures[i][1], o)
+                for i, o in enumerate(combo)
+            ]
+            posset = position_in(sim)
+            all_pos |= posset
+            if next_idx is not None:
+                h, _a = rem_fixtures[next_idx]
+                o = combo[next_idx]
+                team_is_home = (target == h)
+                if o == "D":
+                    draw_pos |= posset
+                elif (o == "H") == team_is_home:
+                    win_pos |= posset
+                else:
+                    loss_pos |= posset
+
+        def guaranteed_top2(s):
+            return bool(s) and max(s) <= 2
+
+        def alive(s):                     # can still finish top 3
+            return bool(s) and min(s) <= 3
+
+        can_third = (3 in all_pos)
+        can_reach_top2 = bool(all_pos) and min(all_pos) <= 2
+
+        if guaranteed_top2(all_pos):
+            return self._mk("already_qualified", 0.75, can_third, "조별리그 통과 확정")
+        if not alive(all_pos):
+            return self._mk("already_eliminated", 0.88, False, "탈락 확정")
+        if guaranteed_top2(draw_pos):
+            return self._mk("draw_enough", 0.87, can_third, "다음 경기 비기면 32강 진출 확정")
+        if alive(win_pos) and not alive(draw_pos) and not alive(loss_pos):
+            return self._mk("must_win", 1.20, can_third, "반드시 이겨야 생존")
+        # "Third only" applies when top 2 is no longer reachable but a draw
+        # keeps a third-place path alive. Leaders still chasing top 2 stay live.
+        if not can_reach_top2 and can_third and alive(draw_pos):
+            return self._mk("live", 0.90, True, "비겨도 3위로 진출 가능 (2위 진입 불가)")
+        return self._mk("live", 1.0, can_third, "진출 경쟁 중")
 
 
 def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str, float]]:
