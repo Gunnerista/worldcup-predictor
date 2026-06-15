@@ -671,6 +671,11 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                 has_saved = False
             b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
 
+            # POST-MATCH shows the PRE-KICKOFF odds (saved snapshot), not the
+            # post-result recompute. Override the top probability bar.
+            if has_saved:
+                b["p1"], b["pdraw"], b["p2"] = round(pp1), round(ppd), round(pp2)
+
             # Prefer the edge snapshot stored at prediction time; fall back to the
             # recomputed model_edge if this prediction predates the snapshot feature.
             if prow and prow["suggested_bet"]:
