@@ -654,7 +654,8 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             prow = None
             try:
                 prow = conn.execute(
-                    "SELECT home_win_pct, draw_pct, away_win_pct FROM predictions "
+                    "SELECT home_win_pct, draw_pct, away_win_pct, "
+                    "suggested_bet, draw_edge, total_xg FROM predictions "
                     "WHERE match_id = ? ORDER BY created_at",
                     (match_id,),
                 ).fetchone()
@@ -669,6 +670,17 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                 pp1, ppd, pp2 = wdl["home_win"], wdl["draw"], wdl["away_win"]
                 has_saved = False
             b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
+
+            # Prefer the edge snapshot stored at prediction time; fall back to the
+            # recomputed model_edge if this prediction predates the snapshot feature.
+            if prow and prow["suggested_bet"]:
+                txg = prow["total_xg"]
+                b["model_edge"] = {
+                    "suggested_bet": prow["suggested_bet"],
+                    "draw_edge": float(prow["draw_edge"]) if prow["draw_edge"] is not None else 0.0,
+                    "total_xg": float(txg) if txg is not None else 0.0,
+                    "under_lean": (float(txg) < 2.5) if txg is not None else False,
+                }
 
             # Predicted winner follows the MODEL EDGE signal (parsed from its
             # suggested_bet string), falling back to highest probability when the
@@ -997,8 +1009,17 @@ def _run_due_predictions() -> int:
                 group_name=r["grp"],
             )
             wdl = pred["win_draw_loss"]
+            eg = pred["expected_goals"]
+            me = generate_model_edge({
+                "team1": home, "team2": away,
+                "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]),
+                "p2": round(wdl["away_win"]),
+                "eg1": eg["home"], "eg2": eg["away"],
+            })
             save_prediction(r["id"], wdl["home_win"], wdl["draw"], wdl["away_win"],
-                            model_version="v1", conn=conn)
+                            model_version="v1", conn=conn,
+                            suggested_bet=me["suggested_bet"],
+                            draw_edge=me["draw_edge"], total_xg=me["total_xg"])
             saved += 1
 
         if saved:

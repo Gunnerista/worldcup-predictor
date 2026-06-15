@@ -221,6 +221,9 @@ def _schema_statements(is_pg: bool) -> list[str]:
             away_win_pct    REAL NOT NULL,
             model_version   TEXT,
             notes           TEXT,
+            suggested_bet   TEXT,
+            draw_edge       REAL,
+            total_xg        REAL,
             FOREIGN KEY (match_id) REFERENCES matches(id)
         )
         """,
@@ -412,8 +415,38 @@ def init_db(db_path: Optional[Path] = None) -> None:
         for stmt in INDEXES:
             cur.execute(stmt)
         conn.commit()
+        _ensure_prediction_edge_columns(conn)
     finally:
         conn.close()
+
+
+def _ensure_prediction_edge_columns(conn) -> None:
+    """Idempotently add edge-snapshot columns to an EXISTING predictions table
+    (CREATE TABLE IF NOT EXISTS won't add columns to a table that already exists).
+    Works on both SQLite and PostgreSQL."""
+    wanted = [("suggested_bet", "TEXT"), ("draw_edge", "REAL"), ("total_xg", "REAL")]
+    try:
+        if USE_POSTGRES:
+            rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'predictions'"
+            ).fetchall()
+            existing = {r[0] for r in rows}
+        else:
+            rows = conn.execute("PRAGMA table_info(predictions)").fetchall()
+            existing = {r[1] for r in rows}
+    except Exception:
+        return
+    for name, coltype in wanted:
+        if name not in existing:
+            try:
+                conn.execute(f"ALTER TABLE predictions ADD COLUMN {name} {coltype}")
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------

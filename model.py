@@ -2276,8 +2276,12 @@ def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
 # ===========================================================================
 
 def save_prediction(match_id, home_win_pct, draw_pct, away_win_pct,
-                    model_version="v1", notes=None, conn=None):
+                    model_version="v1", notes=None, conn=None,
+                    suggested_bet=None, draw_edge=None, total_xg=None):
     """Persist a prediction to the predictions table (percentages 0-100).
+
+    The model-edge snapshot (suggested_bet / draw_edge / total_xg) is stored so
+    POST-MATCH review can show the TRUE pre-kickoff signal rather than recompute.
 
     created_at defaults to CURRENT_TIMESTAMP. Pass an open `conn` to batch
     inside a caller's transaction (the caller then commits); otherwise a
@@ -2291,9 +2295,11 @@ def save_prediction(match_id, home_win_pct, draw_pct, away_win_pct,
     try:
         conn.execute(
             "INSERT INTO predictions "
-            "(match_id, home_win_pct, draw_pct, away_win_pct, model_version, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (match_id, home_win_pct, draw_pct, away_win_pct, model_version, notes),
+            "(match_id, home_win_pct, draw_pct, away_win_pct, model_version, notes, "
+            "suggested_bet, draw_edge, total_xg) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (match_id, home_win_pct, draw_pct, away_win_pct, model_version, notes,
+             suggested_bet, draw_edge, total_xg),
         )
         if own:
             conn.commit()
