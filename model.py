@@ -1214,6 +1214,112 @@ def _run_demo() -> None:
 
 import math as _math
 
+# Module cache: rho is estimated from static 2018/2022 data, so compute once
+# per db_path and reuse across DixonColesEngine instantiations.
+_RHO_CACHE: dict = {}
+_RHO_FALLBACK: float = -0.13
+
+
+def estimate_rho(db_path: str = "worldcup.db") -> float:
+    """MLE of the Dixon-Coles rho from 2018+2022 completed matches.
+
+    Only low-scoring outcomes (0-0, 0-1, 1-0, 1-1) carry information about rho,
+    so the Poisson factors (which don't depend on rho) drop out and the negative
+    log-likelihood reduces to  NLL(ρ) = -Σ log(tau(x, y, λ, μ, ρ)).
+    λ, μ use team xG (team_stats.xg_total) when available, else the actual goals
+    scored (2018 has no team-level xG — see CLAUDE.md §5.1).
+
+    Optimised with a pure-Python golden-section search over [-0.5, 0.5]. The NLL
+    is convex in rho (each term is log of a linear function), so this finds the
+    global optimum — equivalent to scipy.optimize.minimize_scalar but with NO
+    scipy dependency, which this project deliberately does not ship (CLAUDE.md §9;
+    adding scipy would break the Railway build).
+
+    Returns the optimal rho; -0.13 (default) on any failure or when there is no
+    usable data.
+    """
+    if db_path in _RHO_CACHE:
+        return _RHO_CACHE[db_path]
+
+    import database
+
+    try:
+        conn = database.get_connection(None if db_path == "worldcup.db" else db_path)
+    except Exception:
+        return _RHO_FALLBACK
+
+    import sqlite3 as _sq
+    if isinstance(conn, _sq.Connection) and conn.row_factory is not _sq.Row:
+        conn.row_factory = _sq.Row
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.home_score AS hs, m.away_score AS as_,
+                   hts.xg_total AS home_xg, ats.xg_total AS away_xg
+            FROM matches m
+            LEFT JOIN team_stats hts ON hts.match_id = m.id AND hts.is_home = 1
+            LEFT JOIN team_stats ats ON ats.match_id = m.id AND ats.is_home = 0
+            WHERE m.season IN (2018, 2022) AND m.status = 'completed'
+              AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+            """
+        ).fetchall()
+    except Exception:
+        return _RHO_FALLBACK
+    finally:
+        conn.close()
+
+    data = []
+    for r in rows:
+        x, y = r["hs"], r["as_"]
+        lam = r["home_xg"] if r["home_xg"] is not None else x
+        mu  = r["away_xg"] if r["away_xg"] is not None else y
+        data.append((x, y, max(0.05, float(lam)), max(0.05, float(mu))))
+
+    if not data:
+        return _RHO_FALLBACK
+
+    def _tau(x, y, lam, mu, rho):
+        if x == 0 and y == 0:
+            return 1.0 - lam * mu * rho
+        if x == 0 and y == 1:
+            return 1.0 + lam * rho
+        if x == 1 and y == 0:
+            return 1.0 + mu * rho
+        if x == 1 and y == 1:
+            return 1.0 - rho
+        return 1.0
+
+    def _nll(rho):
+        s = 0.0
+        for x, y, lam, mu in data:
+            t = _tau(x, y, lam, mu, rho)
+            s -= _math.log(t if t > 1e-12 else 1e-12)
+        return s
+
+    # Golden-section search (NLL convex in rho).
+    a, b = -0.5, 0.5
+    gr = (_math.sqrt(5.0) - 1.0) / 2.0
+    c = b - gr * (b - a)
+    d = a + gr * (b - a)
+    fc, fd = _nll(c), _nll(d)
+    for _ in range(100):
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - gr * (b - a)
+            fc = _nll(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + gr * (b - a)
+            fd = _nll(d)
+        if abs(b - a) < 1e-7:
+            break
+
+    rho = max(-0.5, min(0.5, (a + b) / 2.0))
+    _RHO_CACHE[db_path] = rho
+    return rho
+
+
 class DixonColesEngine:
     """
     Converts ELO ratings into a full scoreline probability matrix via
@@ -1238,7 +1344,21 @@ class DixonColesEngine:
     DEFAULT_AWAY_DEFENSE:  float = 1.00
     HOME_ADVANTAGE:        float = 1.10   # neutral venue → 1.0
     MAX_GOALS:             int   = 6      # compute P(X=i, Y=j) for i,j in 0..MAX_GOALS
-    RHO:                   float = -0.13  # low-score dependence param (empirical, football)
+    RHO:                   float = -0.13  # class default; overridden per-instance in __init__
+
+    def __init__(self, db_path: str = "worldcup.db"):
+        """Estimate rho from historical data on construction, with fallback.
+
+        self.RHO        — the rho used by this instance
+        self.RHO_SOURCE — "estimated_from_data" | "fallback_default"
+        """
+        rho = estimate_rho(db_path)
+        if rho == _RHO_FALLBACK:
+            self.RHO = _RHO_FALLBACK
+            self.RHO_SOURCE = "fallback_default"
+        else:
+            self.RHO = rho
+            self.RHO_SOURCE = "estimated_from_data"
 
     @staticmethod
     def _tau(x: int, y: int, lam: float, mu: float, rho: float) -> float:
