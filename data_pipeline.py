@@ -1,134 +1,584 @@
 """
-data_pipeline.py — API connection smoke test.
+data_pipeline.py
+================
 
-Run directly: `python data_pipeline.py`
+BALLDONTLIE FIFA Worldcup ingestion + sync.
 
-Tests:
-  1. BALLDONTLIE  GET /fifa/worldcup/v1/teams
-  2. BALLDONTLIE  GET /fifa/worldcup/v1/matches?seasons[]=2026
-  3. Polymarket   GET /markets?tag=soccer
+Project rules enforced here (imported from `database.py`):
+  * Filter parameter MUST be `match_ids[]=...` (array form).
+    The single-key form `match_id=` is silently ignored by the API.
+  * Every API call sleeps `API_THROTTLE_SECONDS` before sending. GOAT plan
+    is 600/min but short bursts hit 429.
+  * Player names are resolved through `database.get_player_name()` after a
+    bulk backfill, never row-by-row over HTTP.
 
-Prints PASS/FAIL + up to 3 sample items per endpoint. No data persisted yet.
+CLI:
+    python data_pipeline.py backfill      # 2018 + 2022 full backfill
+    python data_pipeline.py sync          # 2026 sync (matches + per-match data)
+    python data_pipeline.py today         # today's 2026 matches
+    python data_pipeline.py live          # currently-in-progress matches
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-from typing import Any
+import time
+from datetime import date, datetime
+from typing import Any, Iterable
 
 import requests
 from dotenv import load_dotenv
 
-BALLDONTLIE_BASE = "https://api.balldontlie.io/fifa/worldcup/v1"
-POLYMARKET_BASE = "https://gamma-api.polymarket.com"
-TIMEOUT = 15  # seconds
+import database
+
+# --------------------------------------------------------------------------
+# Setup
+# --------------------------------------------------------------------------
+
+load_dotenv()
+
+BASE        = database.BALLDONTLIE_BASE
+THROTTLE    = database.API_THROTTLE_SECONDS
+MATCH_KEY   = database.MATCH_FILTER_KEY   # "match_ids[]"  (enforced everywhere)
+
+API_KEY     = os.getenv("BALLDONTLIE_API_KEY", "").strip()
+
+BATCH_SIZE_MATCHES = 10
+PAGE_SIZE          = 100
+TIMEOUT_SEC        = 30
+
+_session = requests.Session()
+_session.headers["Authorization"] = API_KEY
 
 
-def _print_header(n: int, title: str) -> None:
-    print()
-    print("=" * 72)
-    print(f"[{n}] {title}")
-    print("=" * 72)
+# --------------------------------------------------------------------------
+# Low-level HTTP
+# --------------------------------------------------------------------------
+
+_MAX_429_RETRIES = 6
 
 
-def _short(value: Any, maxlen: int = 200) -> str:
-    s = json.dumps(value, ensure_ascii=False, default=str)
-    return s if len(s) <= maxlen else s[:maxlen] + " ...(truncated)"
+def _get(path: str, params: dict[str, Any] | None = None) -> dict:
+    """Throttled GET with exponential backoff on 429 (1s, 2s, 4s, 8s, 16s, 32s).
+
+    BALLDONTLIE has both a 600/min cap AND a short-burst limit; THROTTLE alone
+    is not sufficient. Backoff handles the burst limiter.
+    """
+    url = f"{BASE}{path}"
+    backoff = 1.0
+    last_resp = None
+    for attempt in range(_MAX_429_RETRIES):
+        time.sleep(THROTTLE)
+        r = _session.get(url, params=params, timeout=TIMEOUT_SEC)
+        last_resp = r
+        if r.status_code != 429:
+            r.raise_for_status()
+            try:
+                return r.json()
+            except ValueError:
+                return {}
+        # 429 — back off and retry
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 32.0)
+    # all retries exhausted
+    if last_resp is not None:
+        last_resp.raise_for_status()
+    return {}
 
 
-def _extract_list(payload: Any) -> list[Any]:
-    """BALLDONTLIE returns {'data': [...]}. Polymarket returns a list directly."""
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
-        return payload["data"]
-    return []
+def _paginate(path: str, params: dict[str, Any] | None = None,
+              progress_label: str | None = None) -> list[dict]:
+    """Walk all cursor pages and return the flattened data list."""
+    out: list[dict] = []
+    cursor = None
+    page = 0
+    while True:
+        p = dict(params or {})
+        p["per_page"] = PAGE_SIZE
+        if cursor:
+            p["cursor"] = cursor
+        payload = _get(path, p)
+        data = payload.get("data") or []
+        out.extend(data)
+        page += 1
+        if progress_label and page % 5 == 0:
+            print(f"      {progress_label}: page {page}, accumulated {len(out)}")
+        cursor = (payload.get("meta") or {}).get("next_cursor")
+        if not cursor:
+            break
+    return out
 
 
-def _report(resp: requests.Response, label: str) -> bool:
-    ok = resp.ok
-    status_word = "PASS" if ok else "FAIL"
-    print(f"  -> {status_word}  HTTP {resp.status_code}  ({label})")
+def _fetch_for_matches(path: str, match_ids: list[int]) -> list[dict]:
+    """Batched + paginated fetch keyed on match_ids[]=.... Enforces MATCH_KEY."""
+    if not match_ids:
+        return []
+    out: list[dict] = []
+    for i in range(0, len(match_ids), BATCH_SIZE_MATCHES):
+        chunk = match_ids[i:i + BATCH_SIZE_MATCHES]
+        base_params = {MATCH_KEY: [str(m) for m in chunk]}
+        cursor = None
+        while True:
+            p = dict(base_params)
+            p["per_page"] = PAGE_SIZE
+            if cursor:
+                p["cursor"] = cursor
+            payload = _get(path, p)
+            data = payload.get("data") or []
+            out.extend(data)
+            cursor = (payload.get("meta") or {}).get("next_cursor")
+            if not cursor:
+                break
+    return out
+
+
+# --------------------------------------------------------------------------
+# Endpoint fetchers
+# --------------------------------------------------------------------------
+
+def fetch_teams() -> list[dict]:
+    return _paginate("/teams", progress_label="teams")
+
+
+def fetch_players() -> list[dict]:
+    return _paginate("/players", progress_label="players")
+
+
+def fetch_matches(seasons: Iterable[int]) -> list[dict]:
+    params = {"seasons[]": [str(s) for s in seasons]}
+    return _paginate("/matches", params=params, progress_label="matches")
+
+
+def fetch_rosters_by_team(team_id: int, seasons: Iterable[int] | None = None) -> list[dict]:
+    """Per-team roster. Used to resolve player names after a placeholder backfill."""
+    params: dict[str, Any] = {"team_ids[]": [str(team_id)]}
+    if seasons:
+        params["seasons[]"] = [str(s) for s in seasons]
+    return _paginate("/rosters", params=params)
+
+
+def resolve_player_names(conn, seasons: Iterable[int] = (2018, 2022, 2026)) -> int:
+    """Walk every team in DB, fetch its roster(s), UPDATE players.name.
+    Returns number of rows updated. Idempotent and slow (one HTTP call per team)."""
+    rows = conn.execute("SELECT id FROM teams").fetchall()
+    team_ids = [r["id"] for r in rows]
+    updated = 0
+    for i, tid in enumerate(team_ids, 1):
+        try:
+            roster = fetch_rosters_by_team(tid, seasons=seasons)
+        except Exception as e:
+            print(f"      roster team_id={tid}: error {e}")
+            continue
+        for entry in roster:
+            player = entry.get("player") or entry
+            pid = player.get("id")
+            pname = player.get("name")
+            if not pid or not pname:
+                continue
+            res = conn.execute(
+                "UPDATE players SET name = ?, team_id = COALESCE(team_id, ?) "
+                "WHERE id = ? AND (name IS NULL OR name LIKE 'Player #%')",
+                (pname, tid, pid),
+            )
+            updated += res.rowcount
+        if i % 10 == 0:
+            print(f"      rosters: team {i}/{len(team_ids)}  names updated so far: {updated}")
+    conn.commit()
+    return updated
+
+
+# --------------------------------------------------------------------------
+# Upserts (idempotent via INSERT OR IGNORE)
+# --------------------------------------------------------------------------
+
+def upsert_teams(conn, teams: list[dict]) -> None:
+    cur = conn.cursor()
+    for t in teams:
+        cur.execute(
+            "INSERT OR IGNORE INTO teams (id, name, abbreviation, country_code) "
+            "VALUES (?, ?, ?, ?)",
+            (t.get("id"), t.get("name"), t.get("abbreviation"), t.get("country_code")),
+        )
+    conn.commit()
+
+
+def upsert_players(conn, players: list[dict]) -> None:
+    """Resolve team_id via country_code -> teams lookup (national team)."""
+    country_to_team: dict[str, int] = {}
+    for row in conn.execute("SELECT id, country_code FROM teams").fetchall():
+        cc = row["country_code"]
+        if cc:
+            country_to_team[cc] = row["id"]
+
+    cur = conn.cursor()
+    for p in players:
+        tid = country_to_team.get(p.get("country_code"))
+        cur.execute(
+            "INSERT OR IGNORE INTO players (id, name, team_id) VALUES (?, ?, ?)",
+            (p.get("id"), p.get("name"), tid),
+        )
+    conn.commit()
+
+
+def _ensure_player(conn, player_id, team_id=None) -> None:
+    """Insert a stub player row (placeholder name) if the id is unknown.
+    Real names get resolved later via fetch_rosters_by_team()."""
+    if player_id is None:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO players (id, name, team_id) VALUES (?, ?, ?)",
+        (player_id, f"Player #{player_id}", team_id),
+    )
+
+
+def _ensure_team(conn, team: dict | None) -> None:
+    """Insert a team row from a nested match-payload team object if missing.
+
+    /teams returns only the 2026 qualifier set. 2018/2022 had different
+    participants; those team rows come from the match payload itself.
+    """
+    if not team or team.get("id") is None:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO teams (id, name, abbreviation, country_code) "
+        "VALUES (?, ?, ?, ?)",
+        (team.get("id"), team.get("name"), team.get("abbreviation"), team.get("country_code")),
+    )
+
+
+def upsert_matches(conn, matches: list[dict]) -> None:
+    cur = conn.cursor()
+    for m in matches:
+        home_team = m.get("home_team") or {}
+        away_team = m.get("away_team") or {}
+        _ensure_team(conn, home_team)
+        _ensure_team(conn, away_team)
+
+        season = (m.get("season") or {}).get("year")
+        stage  = (m.get("stage") or {}).get("name")
+        group  = (m.get("group") or {}).get("name")
+        cur.execute(
+            """INSERT OR IGNORE INTO matches
+               (id, season, stage, group_name, home_team_id, away_team_id,
+                home_score, away_score, kickoff_utc, status,
+                home_formation, away_formation)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (m.get("id"), season, stage, group, home_team.get("id"), away_team.get("id"),
+             m.get("home_score"), m.get("away_score"),
+             m.get("datetime"), m.get("status"),
+             m.get("home_formation"), m.get("away_formation")),
+        )
+    conn.commit()
+
+
+def upsert_team_stats(conn, items: list[dict]) -> None:
+    cur = conn.cursor()
+    for it in items:
+        cur.execute(
+            """INSERT OR IGNORE INTO team_stats
+               (match_id, team_id, is_home, possession, shots_total, shots_on_target,
+                xg_total, xgot_total, corners, fouls)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (it.get("match_id"), it.get("team_id"),
+             1 if it.get("is_home") else 0,
+             it.get("possession_pct"),                       # API -> our column
+             it.get("shots_total"), it.get("shots_on_target"),
+             it.get("expected_goals"), None,                 # xgot_total derived later
+             it.get("corners"), it.get("fouls")),
+        )
+    conn.commit()
+
+
+def upsert_player_stats(conn, items: list[dict]) -> None:
+    cur = conn.cursor()
+    for it in items:
+        _ensure_player(conn, it.get("player_id"), it.get("team_id"))
+        cur.execute(
+            """INSERT OR IGNORE INTO player_stats
+               (match_id, player_id, team_id, minutes_played,
+                expected_goals, expected_assists, shots, passes_accurate, rating)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (it.get("match_id"), it.get("player_id"), it.get("team_id"),
+             it.get("minutes_played"),
+             it.get("expected_goals"), it.get("expected_assists"),
+             None,                                            # shots derived later
+             it.get("passes_accurate"),
+             it.get("rating")),
+        )
+    conn.commit()
+
+
+def upsert_shots(conn, items: list[dict]) -> None:
+    cur = conn.cursor()
+    for it in items:
+        _ensure_player(conn, it.get("player_id"), it.get("team_id"))
+        cur.execute(
+            """INSERT OR IGNORE INTO match_shots
+               (match_id, player_id, team_id, minute, xg, xgot,
+                player_x, player_y, body_part, situation, shot_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (it.get("match_id"), it.get("player_id"), it.get("team_id"),
+             it.get("time_minute"),
+             it.get("xg"), it.get("xgot"),
+             it.get("player_x"), it.get("player_y"),
+             it.get("body_part"), it.get("situation"), it.get("shot_type")),
+        )
+    conn.commit()
+
+
+def upsert_momentum(conn, items: list[dict]) -> None:
+    """Signed `value` -> home/away momentum (see database.py docstring)."""
+    cur = conn.cursor()
+    for it in items:
+        v = it.get("value")
+        if v is None:
+            home_m, away_m = None, None
+        else:
+            v = float(v)
+            home_m = v if v >= 0 else 0.0
+            away_m = 0.0 if v >= 0 else -v
+        cur.execute(
+            """INSERT OR IGNORE INTO match_momentum
+               (match_id, minute, home_momentum, away_momentum)
+               VALUES (?, ?, ?, ?)""",
+            (it.get("match_id"), it.get("minute"), home_m, away_m),
+        )
+    conn.commit()
+
+
+def upsert_events(conn, items: list[dict]) -> None:
+    cur = conn.cursor()
+    for it in items:
+        cur.execute(
+            """INSERT INTO match_events
+               (match_id, minute, event_type, team_id, player_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (it.get("match_id"),
+             it.get("minute") or it.get("time_minute"),
+             it.get("event_type") or it.get("type"),
+             it.get("team_id"), it.get("player_id")),
+        )
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Derived columns: xgot_total (team) + shots (player) from match_shots
+# --------------------------------------------------------------------------
+
+def compute_derived(conn) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE team_stats
+        SET xgot_total = COALESCE((
+            SELECT SUM(xgot) FROM match_shots
+            WHERE match_shots.match_id = team_stats.match_id
+              AND match_shots.team_id  = team_stats.team_id
+        ), 0)
+    """)
+    cur.execute("""
+        UPDATE player_stats
+        SET shots = COALESCE((
+            SELECT COUNT(*) FROM match_shots
+            WHERE match_shots.match_id  = player_stats.match_id
+              AND match_shots.player_id = player_stats.player_id
+        ), 0)
+    """)
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# High-level operations
+# --------------------------------------------------------------------------
+
+_PER_MATCH_ENDPOINTS = [
+    ("/team_match_stats",   upsert_team_stats,   "team_stats"),
+    ("/player_match_stats", upsert_player_stats, "player_stats"),
+    ("/match_shots",        upsert_shots,        "shots"),
+    ("/match_momentum",     upsert_momentum,     "momentum"),
+    ("/match_events",       upsert_events,       "events"),
+]
+
+
+def _ingest_per_match_data(conn, match_ids: list[int], label: str = "") -> None:
+    total = len(match_ids)
+    if total == 0:
+        return
+    for path, upsert_fn, name in _PER_MATCH_ENDPOINTS:
+        print(f"      {name:14s} <- {path}")
+        done = 0
+        for i in range(0, total, BATCH_SIZE_MATCHES):
+            chunk = match_ids[i:i + BATCH_SIZE_MATCHES]
+            items: list[dict] = []
+            base_params = {MATCH_KEY: [str(m) for m in chunk]}
+            cursor = None
+            while True:
+                p = dict(base_params)
+                p["per_page"] = PAGE_SIZE
+                if cursor:
+                    p["cursor"] = cursor
+                payload = _get(path, p)
+                items.extend(payload.get("data") or [])
+                cursor = (payload.get("meta") or {}).get("next_cursor")
+                if not cursor:
+                    break
+            try:
+                upsert_fn(conn, items)
+            except Exception as e:
+                print(f"        WARN upsert failed for {name} batch {i}: {e}")
+            done += len(chunk)
+            print(f"        경기 {done}/{total} 수집 중... rows={len(items)}")
+
+
+def backfill_historical(seasons: tuple[int, ...] = (2018, 2022)) -> None:
+    """Idempotent full backfill of historical World Cups.
+    Re-running is safe (INSERT OR IGNORE).
+
+    NOTE: /players bulk pagination triggers BALLDONTLIE's burst limiter
+    (the endpoint exposes ~30k+ player rows). We skip it here. Player rows
+    are registered with placeholder names as their IDs appear in per-match
+    data; use resolve_player_names() afterwards to fill real names via /rosters.
+    """
+    print(f"Backfill seasons: {list(seasons)}")
+    database.init_db()
+    conn = database.get_connection()
     try:
-        payload = resp.json()
-    except ValueError:
-        print(f"  -> body (not JSON, first 300 chars): {resp.text[:300]}")
-        return False
+        print("[1/3] teams...")
+        teams = fetch_teams()
+        upsert_teams(conn, teams)
+        print(f"      teams API={len(teams)}  DB={conn.execute('SELECT COUNT(*) FROM teams').fetchone()[0]}")
 
-    items = _extract_list(payload)
-    print(f"  -> items returned: {len(items)}")
+        print("[2/3] matches...")
+        matches = fetch_matches(seasons)
+        upsert_matches(conn, matches)
+        match_ids = [m["id"] for m in matches if m.get("id") is not None]
+        print(f"      matches API={len(matches)}  ids={len(match_ids)}")
 
-    if not ok:
-        print(f"  -> error body: {_short(payload, 400)}")
-        return False
+        print("[3/3] per-match data (placeholder player names auto-registered)...")
+        _ingest_per_match_data(conn, match_ids)
 
-    for i, item in enumerate(items[:3], start=1):
-        print(f"  -> sample {i}: {_short(item, 300)}")
-    return True
+        print("Computing derived columns (team_stats.xgot_total, player_stats.shots)...")
+        compute_derived(conn)
+
+        print()
+        print("=" * 60)
+        print("BACKFILL COMPLETE")
+        print("=" * 60)
+        for table in ("teams", "players", "matches", "team_stats", "player_stats",
+                      "match_shots", "match_momentum", "match_events"):
+            cnt = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            print(f"  {table:20s} {cnt:>7d}")
+    finally:
+        conn.close()
 
 
-def test_balldontlie_teams(api_key: str) -> bool:
-    _print_header(1, "BALLDONTLIE  /teams")
-    url = f"{BALLDONTLIE_BASE}/teams"
-    headers = {"Authorization": api_key}
+def sync_live() -> None:
+    """Refresh 2026 season + ingest per-match data for completed/live matches."""
+    print("Sync 2026 live...")
+    database.init_db()
+    conn = database.get_connection()
     try:
-        resp = requests.get(url, headers=headers, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        print(f"  -> FAIL  network error: {e}")
-        return False
-    return _report(resp, "teams")
+        matches = fetch_matches([2026])
+        upsert_matches(conn, matches)
+        match_ids = [
+            m["id"] for m in matches
+            if (m.get("status") or "").lower() in {"live", "in_progress", "completed", "ft"}
+        ]
+        if match_ids:
+            _ingest_per_match_data(conn, match_ids)
+            compute_derived(conn)
+        print(f"sync done. 2026 matches: {len(matches)}, ingested: {len(match_ids)}")
+    finally:
+        conn.close()
 
 
-def test_balldontlie_matches_2026(api_key: str) -> bool:
-    _print_header(2, "BALLDONTLIE  /matches?seasons[]=2026")
-    url = f"{BALLDONTLIE_BASE}/matches"
-    headers = {"Authorization": api_key}
-    params = {"seasons[]": "2026"}
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        print(f"  -> FAIL  network error: {e}")
-        return False
-    return _report(resp, "matches 2026")
+def get_today_matches(today: date | None = None) -> list[dict]:
+    """2026 matches scheduled for the given UTC date (defaults to today)."""
+    target = today or date.today()
+    matches = fetch_matches([2026])
+    out: list[dict] = []
+    for m in matches:
+        ts = m.get("datetime")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.date() == target:
+            out.append(m)
+    return out
 
 
-def test_polymarket_soccer() -> bool:
-    _print_header(3, "Polymarket  /markets?tag=soccer")
-    url = f"{POLYMARKET_BASE}/markets"
-    params = {"tag": "soccer"}
-    try:
-        resp = requests.get(url, params=params, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        print(f"  -> FAIL  network error: {e}")
-        return False
-    return _report(resp, "polymarket soccer")
-
-
-def main() -> int:
-    load_dotenv()
-    api_key = os.getenv("BALLDONTLIE_API_KEY", "").strip()
-
-    if not api_key or api_key == "your_key_here":
-        print("FATAL: BALLDONTLIE_API_KEY missing or placeholder in .env")
-        return 2
-
-    results = [
-        ("BALLDONTLIE teams", test_balldontlie_teams(api_key)),
-        ("BALLDONTLIE matches 2026", test_balldontlie_matches_2026(api_key)),
-        ("Polymarket soccer", test_polymarket_soccer()),
+def get_live_matches() -> list[dict]:
+    matches = fetch_matches([2026])
+    return [
+        m for m in matches
+        if (m.get("status") or "").lower() in {"live", "in_progress"}
     ]
 
-    print()
-    print("=" * 72)
-    print("SUMMARY")
-    print("=" * 72)
-    for name, ok in results:
-        print(f"  {'PASS' if ok else 'FAIL'}  {name}")
 
-    return 0 if all(ok for _, ok in results) else 1
+def get_match_detail(match_id: int) -> dict:
+    """All per-match endpoint payloads for a single match."""
+    out: dict[str, Any] = {"match_id": match_id}
+    for path, _, label in _PER_MATCH_ENDPOINTS:
+        payload = _get(path, {MATCH_KEY: [str(match_id)], "per_page": PAGE_SIZE})
+        out[label] = payload.get("data") or []
+    return out
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+def _cli() -> int:
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
+
+    if cmd == "backfill":
+        backfill_historical(seasons=(2018, 2022))
+        return 0
+
+    if cmd == "names":
+        conn = database.get_connection()
+        try:
+            n = resolve_player_names(conn, seasons=(2018, 2022, 2026))
+            print(f"player names resolved: {n}")
+        finally:
+            conn.close()
+        return 0
+
+    if cmd == "sync":
+        sync_live()
+        return 0
+
+    if cmd == "today":
+        matches = get_today_matches()
+        print(f"Today ({date.today()}): {len(matches)} matches")
+        for m in matches:
+            ht = (m.get("home_team") or {}).get("name", "?")
+            at = (m.get("away_team") or {}).get("name", "?")
+            print(f"  {m.get('datetime')}  {ht} vs {at}  ({m.get('status')})")
+        return 0
+
+    if cmd == "live":
+        matches = get_live_matches()
+        print(f"Live now: {len(matches)} matches")
+        for m in matches:
+            ht = (m.get("home_team") or {}).get("name", "?")
+            at = (m.get("away_team") or {}).get("name", "?")
+            print(f"  {ht} {m.get('home_score', '?')}-{m.get('away_score', '?')} {at}")
+        return 0
+
+    print("Usage: python data_pipeline.py {backfill|sync|today|live}")
+    return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    if not API_KEY or API_KEY == "your_key_here":
+        print("FATAL: BALLDONTLIE_API_KEY missing/placeholder in .env")
+        sys.exit(2)
+    sys.exit(_cli())

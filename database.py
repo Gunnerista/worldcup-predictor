@@ -56,7 +56,7 @@ from typing import Optional
 
 DB_PATH: Path = Path(__file__).parent / "worldcup.db"
 
-API_THROTTLE_SECONDS: float = 0.1
+API_THROTTLE_SECONDS: float = 0.3   # 200 req/min — well under 600 cap and avoids burst-limit 429s
 MATCH_FILTER_KEY: str = "match_ids[]"   # NOT "match_id="
 BALLDONTLIE_BASE: str = "https://api.balldontlie.io/fifa/worldcup/v1"
 

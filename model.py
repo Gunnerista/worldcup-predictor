@@ -100,6 +100,42 @@ class EloEngine:
 
     # ---- update -----------------------------------------------------------
 
+    # ---- 2026 host + proximity bonuses --------------------------------
+
+    HOST_2026_CODES = {"USA", "CAN", "MEX"}
+    CONMEBOL_CODES  = {"ARG", "BRA", "URU", "COL", "ECU", "VEN", "CHI", "PAR", "BOL", "PER"}
+    HOST_BONUS_ELO       = 50.0
+    PROXIMITY_BONUS_ELO  = 20.0
+
+    def host_bonus(self, country_code: Optional[str]) -> float:
+        if country_code and country_code.upper() in self.HOST_2026_CODES:
+            return self.HOST_BONUS_ELO
+        return 0.0
+
+    def proximity_bonus(self, country_code: Optional[str], host_country: Optional[str]) -> float:
+        """+20 ELO for CONMEBOL teams when the host is a CONCACAF nation (2026 case)."""
+        if (country_code and country_code.upper() in self.CONMEBOL_CODES
+            and host_country and host_country.upper() in self.HOST_2026_CODES):
+            return self.PROXIMITY_BONUS_ELO
+        return 0.0
+
+    def get_win_probability_with_context(
+        self,
+        home_elo: float, away_elo: float,
+        home_country: Optional[str] = None,
+        away_country: Optional[str] = None,
+        host_country: Optional[str] = None,
+    ) -> dict:
+        """Same as get_win_probability but applies 2026 host + CONMEBOL-proximity bonuses."""
+        h_bonus = self.host_bonus(home_country) + self.proximity_bonus(home_country, host_country)
+        a_bonus = self.host_bonus(away_country) + self.proximity_bonus(away_country, host_country)
+        result = self.get_win_probability(home_elo + h_bonus, away_elo + a_bonus)
+        result["home_bonus_elo"] = h_bonus
+        result["away_bonus_elo"] = a_bonus
+        return result
+
+    # -------------------------------------------------------------------
+
     def update(self, home_team: str, away_team: str, result: str, stage: str) -> dict:
         """Apply a match result to both teams' ratings.
 
@@ -241,6 +277,87 @@ class TacticalEngine:
             "note":           f"점유율 우위 (홈 {sign}{abs_diff:.0f}%p) → 홈 승률 보정 {shift*100:+.1f}%p",
         }
 
+    # ---- Altitude impact (2026 venues) --------------------------------
+
+    # Known venue altitudes (meters). Stadium IDs from BALLDONTLIE will be
+    # filled in after backfill; for now we match by name or accept a raw m value.
+    KNOWN_ALTITUDES_M: dict = {
+        "Estadio Azteca":   2240,  # Mexico City
+        "Estadio Akron":    1567,  # Guadalajara
+        "Estadio BBVA":      520,  # Monterrey
+        # US/CAN venues all < 500m
+    }
+    ALTITUDE_THRESHOLD_M = 1500
+    ALTITUDE_PENALTY = {
+        "UEFA":     -0.15,
+        "AFC":      -0.10,
+        "CAF":      -0.08,
+        "CONMEBOL":  0.00,   # adapted
+        "CONCACAF":  0.00,   # local
+        "OFC":      -0.08,
+    }
+
+    def calculate_altitude_impact(self, stadium_id, team_origin: str) -> dict:
+        """Stamina penalty for low-altitude-adapted teams at high-altitude venues.
+
+        stadium_id can be:
+          - a known venue name string (e.g. "Estadio Azteca")
+          - a numeric BALLDONTLIE stadium id (matched against KNOWN_ALTITUDES_M)
+          - a raw altitude in meters (treated as such if >= 200)
+        team_origin: confederation code (UEFA / AFC / CAF / CONMEBOL / CONCACAF / OFC)
+        """
+        # Resolve altitude
+        if isinstance(stadium_id, (int, float)) and float(stadium_id) >= 200:
+            altitude_m = float(stadium_id)
+        else:
+            altitude_m = float(self.KNOWN_ALTITUDES_M.get(stadium_id, 0))
+
+        if altitude_m < self.ALTITUDE_THRESHOLD_M:
+            return {
+                "altitude_m": altitude_m,
+                "impact":     0.0,
+                "note":       f"고도 {altitude_m:.0f}m — 영향 없음",
+            }
+
+        impact = self.ALTITUDE_PENALTY.get(team_origin, -0.08)
+        if impact == 0.0:
+            note = f"고지대 {altitude_m:.0f}m + {team_origin} → 적응됨, 패널티 없음"
+        else:
+            note = f"고지대 {altitude_m:.0f}m + {team_origin} → 체력 {impact*100:+.0f}%"
+        return {"altitude_m": altitude_m, "impact": impact, "note": note}
+
+    # ---- Group-stage situational motivation ---------------------------
+
+    def calculate_group_stage_motivation(self, team_id, current_standings: dict) -> dict:
+        """Motivation/style shift driven by a team's group-stage position.
+
+        current_standings keys:
+          status: one of 'qualified' | 'eliminated' | 'must_win' | 'draw_sufficient' | 'live'
+        """
+        status = ((current_standings or {}).get("status") or "live").lower().strip()
+
+        if status == "qualified":
+            return {"motivation_shift": -0.10,
+                    "pattern": "안전 운영 / 로테이션 예상",
+                    "note":    "16강 확정 → 집중력 -10%p"}
+        if status == "eliminated":
+            return {"motivation_shift": -0.20,
+                    "pattern": "동기부여 저하 — 자존심 경기",
+                    "note":    "탈락 확정 → 동기부여 -20%p"}
+        if status == "must_win":
+            return {"motivation_shift": +0.15,
+                    "pattern": "공격적 / 모험적",
+                    "note":    "무조건 이겨야 함 → +15%p"}
+        if status == "draw_sufficient":
+            return {"motivation_shift": +0.05,
+                    "pattern": "안전 플레이 — 비기면 통과",
+                    "note":    "비기면 통과 → 안정성 +5%p"}
+        return {"motivation_shift": 0.0,
+                "pattern": "균형 운영",
+                "note":    "조별 상황 미정"}
+
+    # -------------------------------------------------------------------
+
     def get_concede_pattern(self, team_id, recent_matches: list) -> dict:
         """Aggregate concede minute-buckets + zones across recent matches.
 
@@ -365,6 +482,64 @@ class PlayerMatchupEngine:
         score = int(round(weighted / 3.5))
         return max(0, min(100, score))
 
+    # ---- Rest-days fatigue ---------------------------------------------
+
+    @staticmethod
+    def _to_date(x):
+        """Accept date / datetime / ISO-8601 string. Return date or None."""
+        from datetime import date as _date, datetime as _dt
+        if isinstance(x, _dt):
+            return x.date()
+        if isinstance(x, _date):
+            return x
+        if isinstance(x, str):
+            try:
+                return _dt.fromisoformat(x.replace("Z", "+00:00")).date()
+            except ValueError:
+                return None
+        return None
+
+    def calculate_rest_days_impact(
+        self,
+        team_id,
+        match_date,
+        recent_matches: Optional[list] = None,
+    ) -> dict:
+        """Fatigue penalty from short rest between matches.
+
+        Spec:
+          ≤ 3 days rest -> fatigue +20
+          == 4 days     -> fatigue +10
+          ≥ 5 days      -> 0 (normal)
+        """
+        mdate = self._to_date(match_date)
+        if not mdate:
+            return {"rest_days": None, "fatigue_penalty": 0, "note": "match_date 파싱 실패"}
+        if not recent_matches:
+            return {"rest_days": None, "fatigue_penalty": 0,
+                    "note": "이전 경기 데이터 없음 — 패널티 0"}
+
+        prev_dates = sorted(
+            [d for d in (self._to_date(m.get("date")) for m in recent_matches)
+             if d and d < mdate],
+            reverse=True,
+        )
+        if not prev_dates:
+            return {"rest_days": None, "fatigue_penalty": 0,
+                    "note": "이전 경기 없음 — 패널티 0"}
+
+        delta = (mdate - prev_dates[0]).days
+        if delta <= 3:
+            return {"rest_days": delta, "fatigue_penalty": 20,
+                    "note": f"휴식 {delta}일 (≤3일) → 피로도 +20"}
+        if delta == 4:
+            return {"rest_days": delta, "fatigue_penalty": 10,
+                    "note": "휴식 4일 → 피로도 +10"}
+        return {"rest_days": delta, "fatigue_penalty": 0,
+                "note": f"휴식 {delta}일 (정상)"}
+
+    # -------------------------------------------------------------------
+
     def world_cup_motivation_bonus(self, team: dict, match_context: dict) -> dict:
         """Return {bonus, explanation}. bonus is an additive shift to win prob."""
         bonus = 0.0
@@ -413,17 +588,20 @@ class PatternMatcher:
         self._stds_cache: Optional[dict[str, float]] = None
 
     def _per_feature_std(self, keys: list) -> dict:
+        """Per-feature std for z-scoring. Features with no historical variance
+        get a huge std so their contribution to distance becomes ~0 (i.e. they
+        are treated as uninformative for similarity ranking)."""
         if self._stds_cache is not None:
             return self._stds_cache
         stds: dict[str, float] = {}
         for k in keys:
             vals = [float(h["features"].get(k, 0) or 0) for h in self.historical]
             if not vals:
-                stds[k] = 1.0
+                stds[k] = 1e9   # no data -> ignore
                 continue
             mean = sum(vals) / len(vals)
             var = sum((v - mean) ** 2 for v in vals) / len(vals)
-            stds[k] = math.sqrt(var) if var > 0 else 1.0
+            stds[k] = math.sqrt(var) if var > 0 else 1e9   # uninformative -> ignore
         self._stds_cache = stds
         return stds
 
@@ -452,6 +630,56 @@ class PatternMatcher:
             })
         results.sort(key=lambda e: e["similarity_pct"], reverse=True)
         return results[:top_n]
+
+    # ---- Red-card impact model (for LIVE recompute) -------------------
+
+    def calculate_redcard_impact(
+        self,
+        minute: int,
+        sent_off_team: str,
+        current_score_diff: float,
+    ) -> dict:
+        """Estimated win-prob shift on the OPPOSING side after a red card.
+
+        Args:
+            minute: 0–120
+            sent_off_team: 'home' | 'away'
+            current_score_diff: home_score - away_score (positive = home leads)
+
+        Model:
+            base_shift_pp = max(5, 25 - 0.25 * minute)
+              -> minute 0  ≈ 25%p,  minute 80 ≈ 5%p
+            score modulator:
+              sent-off team is trailing   -> shift × 1.2   (compound disadvantage)
+              sent-off team is leading    -> shift × 0.85  (park-the-bus mitigates)
+        """
+        base_shift_pp = max(5.0, 25.0 - 0.25 * float(minute))
+        sd = float(current_score_diff or 0)
+
+        if sent_off_team == "home":
+            if sd < 0:
+                base_shift_pp *= 1.2
+            elif sd > 0:
+                base_shift_pp *= 0.85
+        elif sent_off_team == "away":
+            if sd > 0:
+                base_shift_pp *= 1.2
+            elif sd < 0:
+                base_shift_pp *= 0.85
+
+        opponent = "away" if sent_off_team == "home" else "home"
+        return {
+            "sent_off_team":                    sent_off_team,
+            "minute":                           minute,
+            "opposing_team":                    opponent,
+            "opposing_team_win_prob_shift_pp":  round(base_shift_pp, 1),
+            "note": (
+                f"{minute}분 {sent_off_team} 퇴장 + 스코어 {sd:+.0f} → "
+                f"{opponent} 승률 +{base_shift_pp:.1f}%p"
+            ),
+        }
+
+    # -------------------------------------------------------------------
 
     def calculate_upset_probability(self, similar_matches: list) -> float:
         """Similarity-weighted fraction of upsets among the top matches."""
@@ -694,12 +922,102 @@ class NarrativeEngine:
 # Demo: Korea vs Portugal — synthetic but realistic inputs
 # ===========================================================================
 
+def _load_historical_from_db() -> list:
+    """Build historical matches from worldcup.db. Returns [] if DB empty/missing.
+
+    Joins matches + team_stats and produces feature dicts compatible with
+    PatternMatcher. Outcome.was_upset uses an xG-based heuristic: the team
+    with the higher xG was 'expected' to win; if they didn't, it's an upset.
+    """
+    try:
+        import database
+        conn = database.get_connection()
+    except Exception:
+        return []
+    try:
+        rows = conn.execute("""
+            SELECT m.id, m.season, m.home_score, m.away_score,
+                   ht.name AS home_name, at.name AS away_name,
+                   hs.xg_total       AS home_xg,
+                   hs.shots_total    AS home_shots,
+                   hs.possession     AS home_poss,
+                   aw.xg_total       AS away_xg,
+                   aw.shots_total    AS away_shots,
+                   aw.possession     AS away_poss
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            JOIN team_stats hs ON hs.match_id = m.id AND hs.team_id = m.home_team_id
+            JOIN team_stats aw ON aw.match_id = m.id AND aw.team_id = m.away_team_id
+            WHERE m.status = 'completed' AND m.season IN (2018, 2022)
+        """).fetchall()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return []
+
+    out: list[dict] = []
+    for r in rows:
+        home_xg     = float(r["home_xg"] or 0)
+        away_xg     = float(r["away_xg"] or 0)
+        home_poss   = float(r["home_poss"] if r["home_poss"] is not None else 50)
+        away_poss   = float(r["away_poss"] if r["away_poss"] is not None else 50)
+        home_shots  = float(r["home_shots"] or 0)
+        away_shots  = float(r["away_shots"] or 0)
+        home_score  = int(r["home_score"] or 0)
+        away_score  = int(r["away_score"] or 0)
+
+        features = {
+            "xg_diff":              home_xg - away_xg,
+            "elo_diff":             0,   # not back-computed
+            "possession_diff":      home_poss - away_poss,
+            "shots_diff":           home_shots - away_shots,
+            "fatigue_diff":         0,
+            "elimination_pressure": 0,
+        }
+
+        # Upset heuristic: the "expected winner" (by xG, or by shots if xG=0) failed to win.
+        # Falling back to shots is necessary because BALLDONTLIE 2018 team-level
+        # data lacks expected_goals.
+        home_won = home_score > away_score
+        away_won = away_score > home_score
+        xg_d    = features["xg_diff"]
+        shot_d  = features["shots_diff"]
+        if abs(xg_d) > 0.3:
+            stronger_is_home = xg_d >  0.3
+            stronger_is_away = xg_d < -0.3
+        else:
+            stronger_is_home = shot_d >  4
+            stronger_is_away = shot_d < -4
+        was_upset = (stronger_is_home and not home_won) or (stronger_is_away and not away_won)
+
+        out.append({
+            "label":   f"{r['season']} {r['home_name']} vs {r['away_name']}",
+            "features": features,
+            "outcome":  {"was_upset": was_upset, "summary": f"{home_score}-{away_score}"},
+            "lesson":   f"DB 백필: 스코어 {home_score}-{away_score}, xG {home_xg:.2f}-{away_xg:.2f}",
+        })
+
+    try:
+        conn.close()
+    except Exception:
+        pass
+    return out
+
+
 def _historical_dataset() -> list:
-    """Small set of WC-style historical matches used by PatternMatcher.
+    """Prefer real backfilled data; fall back to a hardcoded sample if DB is empty.
 
     Feature vector convention (home-team perspective):
       xg_diff, elo_diff, possession_diff, shots_diff, fatigue_diff, elimination_pressure
     """
+    db_matches = _load_historical_from_db()
+    if db_matches:
+        print(f"[model] historical from DB: {len(db_matches)} matches")
+        return db_matches
+    print("[model] DB historical empty -- falling back to hardcoded sample")
     return [
         {
             "label": "2022 아르헨티나 vs 사우디",
