@@ -1275,15 +1275,18 @@ class DixonColesEngine:
         # Softened to /1600 so ELO does not double-count strength already
         # captured by attack/defense (a 160-pt gap → factor ≈ 1.26 / 0.79).
         elo_weight = 10 ** (elo_diff / 1600.0)
+        # Clamp the ELO factor so even a huge gap keeps the λ ratio under ~2.8x
+        # (0.6..1.67). World Cup upsets are real; never crush the underdog to 0.
+        elo_weight = max(0.6, min(1.67, elo_weight))
 
         ha = 1.0 if neutral_venue else self.HOME_ADVANTAGE
 
         lam = home_attack * away_defense * ha * elo_weight
         mu  = away_attack * home_defense * (1.0 / elo_weight)
 
-        # Clamp to reasonable range [0.2, 4.0]
-        lam = max(0.2, min(4.0, lam))
-        mu  = max(0.2, min(4.0, mu))
+        # Clamp to a realistic per-match expected-goals range [0.3, 3.0].
+        lam = max(0.3, min(3.0, lam))
+        mu  = max(0.3, min(3.0, mu))
         return lam, mu
 
     def scoreline_matrix(
