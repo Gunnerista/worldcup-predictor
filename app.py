@@ -38,7 +38,7 @@ import polymarket
 from model import (
     EloEngine, TacticalEngine, PlayerMatchupEngine,
     PatternMatcher, NarrativeEngine, _load_historical_from_db,
-    build_2026_elo, DixonColesEngine, save_prediction,
+    build_2026_elo, DixonColesEngine, save_prediction, compute_brier_score,
     INITIAL_RATINGS_2026,
 )
 
@@ -278,110 +278,184 @@ def _key_players_for(home_name: str, away_name: str) -> list:
     return engine.get_key_players(team_id=None, match_stats=candidates, top_n=3)
 
 
-def _build_pre_match_bundle(match: dict) -> dict:
-    """Run every engine for a match and return a render-ready bundle."""
-    _ensure_engines()
-    tactical = TacticalEngine()
-    player_engine = PlayerMatchupEngine()
-    narrator = NarrativeEngine()
+def _load_user_notes(conn, match_id):
+    """Latest user_notes row -> a notes_dict for DixonColesEngine.apply_user_notes.
 
-    home_name = (match.get("home_team") or {}).get("name", "Home")
-    away_name = (match.get("away_team") or {}).get("name", "Away")
-    home_cc   = (match.get("home_team") or {}).get("country_code")
-    away_cc   = (match.get("away_team") or {}).get("country_code")
-
-    home_elo = _elo.get_rating(home_name)
-    away_elo = _elo.get_rating(away_name)
-
-    # ELO with 2026 host/proximity bonuses (assume US-side host for demo)
-    elo_result = _elo.get_win_probability_with_context(
-        home_elo, away_elo,
-        home_country=home_cc, away_country=away_cc, host_country="USA",
-    )
-
-    conn = database.get_connection()
+    user_notes is free-text and per-match (no home/away split), so we map the
+    'tactics' text to tactical_note (the '수비'/'공격' keyword detector reads it)
+    and infer condition from 'player_condition' keywords. The note is attributed
+    to the HOME side (the team the report is centred on); away_notes stays None.
+    key_player_out can't be parsed from free text, so it is omitted.
+    Returns (home_notes, away_notes).
+    """
     try:
+        row = conn.execute(
+            "SELECT tactics, player_condition FROM user_notes "
+            "WHERE match_id = ? ORDER BY created_at DESC",
+            (match_id,),
+        ).fetchone()
+    except Exception:
+        return None, None
+    if not row:
+        return None, None
+
+    tactics = (row["tactics"] or "").strip()
+    cond_text = (row["player_condition"] or "")
+    notes: dict = {}
+    if tactics:
+        notes["tactical_note"] = tactics
+    neg = any(k in cond_text for k in ("부상", "피로", "결장", "악화", "negative"))
+    pos = any(k in cond_text for k in ("호조", "최상", "정상", "positive"))
+    if neg and not pos:
+        notes["condition"] = "negative"
+    elif pos and not neg:
+        notes["condition"] = "positive"
+
+    return (notes or None), None
+
+
+def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
+    """Run every engine for a match and return a render-ready bundle.
+
+    Win/draw/loss now comes from DixonColesEngine (group situation, player xG and
+    user notes folded into λ); ELO is kept only for the displayed rating numbers
+    and the narrator's reason text. Returns None if the match is unknown.
+    """
+    _ensure_engines()
+
+    own_conn = conn is None
+    if own_conn:
+        conn = database.get_connection()
+    else:
+        import sqlite3 as _sq
+        if isinstance(conn, _sq.Connection) and conn.row_factory is not _sq.Row:
+            conn.row_factory = _sq.Row
+
+    try:
+        match = _load_match_from_db_or_api(match_id)
+        if not match:
+            return None
+
+        tactical = TacticalEngine()
+        player_engine = PlayerMatchupEngine()
+        narrator = NarrativeEngine()
+
+        home_name = (match.get("home_team") or {}).get("name", "Home")
+        away_name = (match.get("away_team") or {}).get("name", "Away")
+        home_cc   = (match.get("home_team") or {}).get("country_code")
+        away_cc   = (match.get("away_team") or {}).get("country_code")
+        group_name = (match.get("group") or {}).get("name")
+
+        home_elo = _elo.get_rating(home_name)
+        away_elo = _elo.get_rating(away_name)
+
+        # ELO with 2026 host/proximity bonuses — kept for rating display + narrator.
+        elo_result = _elo.get_win_probability_with_context(
+            home_elo, away_elo,
+            home_country=home_cc, away_country=away_cc, host_country="USA",
+        )
+
+        # Dixon-Coles W/D/L (group situation + player xG + user notes folded in).
+        home_notes, away_notes = _load_user_notes(conn, match_id)
+        dc = DixonColesEngine()
+        pred = dc.predict_from_db(
+            home_name, away_name,
+            home_elo=home_elo, away_elo=away_elo,
+            group_name=group_name,
+            home_notes=home_notes, away_notes=away_notes,
+            top_n=10,
+        )
+        wdl = pred["win_draw_loss"]
+
         home_recent = _recent_team_stats(conn, home_name)
         away_recent = _recent_team_stats(conn, away_name)
+
+        home_prev = tactical.analyze_previous_match(home_name, _zone_proxy(home_recent))
+        away_prev = tactical.analyze_previous_match(away_name, _zone_proxy(away_recent))
+
+        poss_impact = tactical.calculate_possession_impact(
+            home_recent["possession_pct"], away_recent["possession_pct"],
+        )
+
+        key_players = _key_players_for(home_name, away_name)
+
+        xg_diff = round(home_recent["xg_total"] - away_recent["xg_total"], 2)
+
+        current_features = {
+            "xg_diff":              xg_diff,
+            "elo_diff":             home_elo - away_elo,
+            "possession_diff":      home_recent["possession_pct"] - away_recent["possession_pct"],
+            "shots_diff":           home_recent["shots_total"]    - away_recent["shots_total"],
+            "fatigue_diff":         0,
+            "elimination_pressure": 0,
+        }
+        similar_matches = _pattern_matcher.find_similar_matches(current_features, top_n=3)
+        upset_pct = _pattern_matcher.calculate_upset_probability(similar_matches)
+
+        motiv_home = player_engine.world_cup_motivation_bonus(
+            {"name": home_name},
+            {"must_win": False, "already_qualified": False, "elo_diff": home_elo - away_elo},
+        )
+        motiv_away = player_engine.world_cup_motivation_bonus(
+            {"name": away_name},
+            {"must_win": False, "already_qualified": False, "elo_diff": away_elo - home_elo},
+        )
+
+        reasons = narrator.generate_reasons(
+            elo_result, poss_impact, {"xg_diff": xg_diff},
+        )
+        key_lines = narrator.generate_key_matchups(key_players)
+        warnings_list = narrator.generate_warning(similar_matches, poss_impact, upset_pct)
+        warnings_list.append(f"⚠️ 역전 가능성 {upset_pct:.0f}%")
+
+        # Polymarket: best-effort, never block the page
+        poly_qual = poly_group = None
+        try:
+            poly_qual = polymarket.get_qualification_odds(home_name, round="16")
+        except Exception as e:
+            print(f"polymarket qual error: {e}")
+        try:
+            poly_group = polymarket.get_group_winner_odds(home_name)
+        except Exception as e:
+            print(f"polymarket group error: {e}")
+
+        return {
+            "match":         match,
+            "home_name":     home_name,
+            "away_name":     away_name,
+            # W/D/L now from Dixon-Coles (keep home_pct/away_pct for the template).
+            "home_pct":      round(wdl["home_win"]),
+            "draw_pct":      round(wdl["draw"]),
+            "away_pct":      round(wdl["away_win"]),
+            "home_win_pct":  round(wdl["home_win"]),
+            "away_win_pct":  round(wdl["away_win"]),
+            "expected_goals": pred["expected_goals"],
+            "scoreline_matrix": pred["top_scorelines"],   # top 10
+            "situation":     pred.get("situation"),
+            "model_used":    "Dixon-Coles v1",
+            "elo_diff":      round(home_elo - away_elo),
+            "home_elo":      round(home_elo),
+            "away_elo":      round(away_elo),
+            "home_prev":     home_prev,
+            "away_prev":     away_prev,
+            "poss_impact":   poss_impact,
+            "key_players":   key_players,
+            "key_lines":     key_lines,
+            "similar_matches": similar_matches,
+            "upset_pct":     upset_pct,
+            "motiv_home":    motiv_home,
+            "motiv_away":    motiv_away,
+            "reasons":       reasons,
+            "warnings":      warnings_list,
+            "xg_diff":       xg_diff,
+            "home_recent":   home_recent,
+            "away_recent":   away_recent,
+            "poly_qual_pct": round(poly_qual * 100) if poly_qual is not None else None,
+            "poly_group_pct": round(poly_group * 100) if poly_group is not None else None,
+        }
     finally:
-        conn.close()
-
-    home_prev = tactical.analyze_previous_match(home_name, _zone_proxy(home_recent))
-    away_prev = tactical.analyze_previous_match(away_name, _zone_proxy(away_recent))
-
-    poss_impact = tactical.calculate_possession_impact(
-        home_recent["possession_pct"], away_recent["possession_pct"],
-    )
-
-    key_players = _key_players_for(home_name, away_name)
-
-    xg_diff = round(home_recent["xg_total"] - away_recent["xg_total"], 2)
-
-    current_features = {
-        "xg_diff":              xg_diff,
-        "elo_diff":             home_elo - away_elo,
-        "possession_diff":      home_recent["possession_pct"] - away_recent["possession_pct"],
-        "shots_diff":           home_recent["shots_total"]    - away_recent["shots_total"],
-        "fatigue_diff":         0,
-        "elimination_pressure": 0,
-    }
-    similar_matches = _pattern_matcher.find_similar_matches(current_features, top_n=3)
-    upset_pct = _pattern_matcher.calculate_upset_probability(similar_matches)
-
-    motiv_home = player_engine.world_cup_motivation_bonus(
-        {"name": home_name},
-        {"must_win": False, "already_qualified": False, "elo_diff": home_elo - away_elo},
-    )
-    motiv_away = player_engine.world_cup_motivation_bonus(
-        {"name": away_name},
-        {"must_win": False, "already_qualified": False, "elo_diff": away_elo - home_elo},
-    )
-
-    reasons = narrator.generate_reasons(
-        elo_result, poss_impact, {"xg_diff": xg_diff},
-    )
-    key_lines = narrator.generate_key_matchups(key_players)
-    warnings_list = narrator.generate_warning(similar_matches, poss_impact, upset_pct)
-    warnings_list.append(f"⚠️ 역전 가능성 {upset_pct:.0f}%")
-
-    # Polymarket: best-effort, never block the page
-    poly_qual = poly_group = None
-    try:
-        poly_qual = polymarket.get_qualification_odds(home_name, round="16")
-    except Exception as e:
-        print(f"polymarket qual error: {e}")
-    try:
-        poly_group = polymarket.get_group_winner_odds(home_name)
-    except Exception as e:
-        print(f"polymarket group error: {e}")
-
-    return {
-        "match":         match,
-        "home_name":     home_name,
-        "away_name":     away_name,
-        "home_pct":      round(elo_result["home"] * 100),
-        "draw_pct":      round(elo_result["draw"] * 100),
-        "away_pct":      round(elo_result["away"] * 100),
-        "elo_diff":      round(elo_result["elo_diff"]),
-        "home_elo":      round(home_elo),
-        "away_elo":      round(away_elo),
-        "home_prev":     home_prev,
-        "away_prev":     away_prev,
-        "poss_impact":   poss_impact,
-        "key_players":   key_players,
-        "key_lines":     key_lines,
-        "similar_matches": similar_matches,
-        "upset_pct":     upset_pct,
-        "motiv_home":    motiv_home,
-        "motiv_away":    motiv_away,
-        "reasons":       reasons,
-        "warnings":      warnings_list,
-        "xg_diff":       xg_diff,
-        "home_recent":   home_recent,
-        "away_recent":   away_recent,
-        "poly_qual_pct": round(poly_qual * 100) if poly_qual is not None else None,
-        "poly_group_pct": round(poly_group * 100) if poly_group is not None else None,
-    }
+        if own_conn:
+            conn.close()
 
 
 def _load_match_from_db_or_api(match_id: int) -> Optional[dict]:
@@ -431,36 +505,63 @@ def index():
         print(f"index: today fetch error: {e}")
         matches = []
 
+    dc = DixonColesEngine()
     enriched = []
     for m in matches:
         home = (m.get("home_team") or {}).get("name", "?")
         away = (m.get("away_team") or {}).get("name", "?")
-        h_elo = _elo.get_rating(home)
-        a_elo = _elo.get_rating(away)
-        probs = _elo.get_win_probability(h_elo, a_elo)
+        group = (m.get("group") or {}).get("name", "")
+        try:
+            pred = dc.predict_from_db(
+                home, away,
+                home_elo=_elo.get_rating(home),
+                away_elo=_elo.get_rating(away),
+                group_name=group or None,
+            )
+            wdl = pred["win_draw_loss"]
+            home_pct = round(wdl["home_win"])
+            draw_pct = round(wdl["draw"])
+            away_pct = round(wdl["away_win"])
+            home_sit = (pred.get("situation") or {}).get("home") or {}
+            note = home_sit.get("note")
+        except Exception as e:
+            print(f"index: predict error for {home} vs {away}: {e}")
+            probs = _elo.get_win_probability(_elo.get_rating(home), _elo.get_rating(away))
+            home_pct = round(probs["home"] * 100)
+            draw_pct = round(probs["draw"] * 100)
+            away_pct = round(probs["away"] * 100)
+            note = None
         enriched.append({
             "id":         m.get("id"),
             "home_name":  home,
             "away_name":  away,
-            "home_pct":   round(probs["home"] * 100),
-            "draw_pct":   round(probs["draw"] * 100),
-            "away_pct":   round(probs["away"] * 100),
+            "home_pct":   home_pct,
+            "draw_pct":   draw_pct,
+            "away_pct":   away_pct,
+            "note":       note,
             "status":     m.get("status"),
             "kickoff":    m.get("datetime"),
             "home_score": m.get("home_score"),
             "away_score": m.get("away_score"),
-            "group":      (m.get("group") or {}).get("name", ""),
+            "group":      group,
         })
 
     return render_template("index.html", matches=enriched, today=date.today().isoformat())
 
 
+@app.route("/api/brier")
+def api_brier():
+    """Model calibration: Brier score over completed, predicted 2026 matches."""
+    res = compute_brier_score(season=2026)
+    return {"brier_score": res["brier_score"], "n_matches": res["n_matches"]}
+
+
 @app.route("/match/<int:match_id>")
 def match_detail(match_id: int):
-    match = _load_match_from_db_or_api(match_id)
-    if not match:
+    bundle = _build_pre_match_bundle(match_id)
+    if not bundle:
         abort(404)
-    bundle = _build_pre_match_bundle(match)
+    match = bundle["match"]
 
     # Phase detection: pre / live / post
     status = (match.get("status") or "").lower()
