@@ -1641,7 +1641,8 @@ class DixonColesEngine:
             if own_conn:
                 conn.close()
 
-        xgs = [r["match_xg"] for r in rows if r["match_xg"] is not None]
+        # float() guards against psycopg2 returning Decimal for numeric aggregates.
+        xgs = [float(r["match_xg"]) for r in rows if r["match_xg"] is not None]
         if not xgs:
             return 1.0
         recent = xgs[0]
@@ -1718,10 +1719,11 @@ class DixonColesEngine:
         home_adj = self._player_xg_adjustment(home_name, db_path=db_path)
         away_adj = self._player_xg_adjustment(away_name, db_path=db_path)
 
-        ha = (home["attack"]  if home is not None else 1.0) * home_adj
-        hd =  home["defense"] if home is not None else 1.0
-        aa = (away["attack"]  if away is not None else 1.0) * away_adj
-        ad =  away["defense"] if away is not None else 1.0
+        # float() guards: DB-sourced strengths may be Decimal on PostgreSQL.
+        ha = float(home["attack"]  if home is not None else 1.0) * float(home_adj)
+        hd = float(home["defense"] if home is not None else 1.0)
+        aa = float(away["attack"]  if away is not None else 1.0) * float(away_adj)
+        ad = float(away["defense"] if away is not None else 1.0)
 
         # Group-stage situation: each team's λ scaled by its motivation state.
         sit_home = sit_away = None
@@ -2188,14 +2190,16 @@ def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str,
         return {}
 
     # League average goals per team per match (== avg goals_for == avg goals_against).
-    league_avg = sum(r["gf"] for r in rows) / len(rows)
+    # float() everywhere: on PostgreSQL, AVG() over INTEGER scores returns Decimal,
+    # which then breaks `Decimal * float` arithmetic downstream.
+    league_avg = sum(float(r["gf"] or 0) for r in rows) / len(rows)
     if league_avg <= 0:
         return {}
 
     return {
         r["name"]: {
-            "attack": r["gf"] / league_avg,
-            "defense": r["ga"] / league_avg,
+            "attack":  float(round(float(r["gf"] or 0) / league_avg, 4)),
+            "defense": float(round(float(r["ga"] or 0) / league_avg, 4)),
         }
         for r in rows
     }
