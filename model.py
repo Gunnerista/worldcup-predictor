@@ -1271,8 +1271,10 @@ class DixonColesEngine:
         λ_away = away_attack × home_defense × elo_weight_inv
         """
         elo_diff = home_elo - away_elo
-        # ELO-based strength ratio: 400-point diff → factor ≈ 1.33 / 0.75
-        elo_weight = 10 ** (elo_diff / 800.0)   # softer than std 400 for goals
+        # ELO sets direction only; attack/defense strengths drive goal counts.
+        # Softened to /1600 so ELO does not double-count strength already
+        # captured by attack/defense (a 160-pt gap → factor ≈ 1.26 / 0.79).
+        elo_weight = 10 ** (elo_diff / 1600.0)
 
         ha = 1.0 if neutral_venue else self.HOME_ADVANTAGE
 
@@ -1374,6 +1376,91 @@ class DixonColesEngine:
             "rho":              self.RHO,
         }
 
+    # Map canonical DB team name -> known aliases / alternate spellings.
+    # Lookups are case-insensitive (see _resolve_strength).
+    TEAM_ALIASES: dict[str, list[str]] = {
+        "South Korea":  ["Korea", "Korea Republic", "한국", "대한민국"],
+        "USA":          ["United States", "United States of America", "미국"],
+        "IR Iran":      ["Iran", "이란"],
+        "Korea DPR":    ["North Korea"],
+        "Czechia":      ["Czech Republic"],
+        "China PR":     ["China"],
+    }
+
+    def _resolve_strength(
+        self,
+        name: str,
+        strengths: dict[str, dict[str, float]],
+    ) -> dict[str, float] | None:
+        """
+        Resolve a (possibly aliased) team name to its strength entry.
+        Returns None if the team cannot be found.
+        """
+        # 1. Exact match
+        if name in strengths:
+            return strengths[name]
+
+        # 2. Alias match: input name listed among a DB team's aliases
+        for db_name, aliases in self.TEAM_ALIASES.items():
+            if name == db_name or name in aliases:
+                if db_name in strengths:
+                    return strengths[db_name]
+
+        # 3. Case-insensitive fallback against DB names and aliases
+        lower = name.lower()
+        for team_name, entry in strengths.items():
+            if team_name.lower() == lower:
+                return entry
+        for db_name, aliases in self.TEAM_ALIASES.items():
+            if lower in [a.lower() for a in aliases] or lower == db_name.lower():
+                if db_name in strengths:
+                    return strengths[db_name]
+
+        return None
+
+    def predict_from_db(
+        self,
+        home_name: str,
+        away_name: str,
+        home_elo: float,
+        away_elo: float,
+        db_path: str = "worldcup.db",
+        neutral_venue: bool = True,
+        top_n: int = 5,
+    ) -> dict:
+        """
+        Like predict(), but auto-loads attack/defense strengths from the DB by
+        team name. Falls back to 1.0/1.0 (league-average) for any team not found.
+
+        Adds a "strength_source" key to the result reporting which side(s) used
+        DB strengths vs. the league-average fallback.
+        """
+        strengths = _team_strengths_from_db(db_path)
+
+        home = self._resolve_strength(home_name, strengths)
+        away = self._resolve_strength(away_name, strengths)
+
+        ha = home["attack"]  if home is not None else 1.0
+        hd = home["defense"] if home is not None else 1.0
+        aa = away["attack"]  if away is not None else 1.0
+        ad = away["defense"] if away is not None else 1.0
+
+        result = self.predict(
+            home_elo=home_elo,
+            away_elo=away_elo,
+            home_attack=ha,
+            home_defense=hd,
+            away_attack=aa,
+            away_defense=ad,
+            neutral_venue=neutral_venue,
+            top_n=top_n,
+        )
+        result["strength_source"] = {
+            "home": "db" if home is not None else "fallback(1.0)",
+            "away": "db" if away is not None else "fallback(1.0)",
+        }
+        return result
+
     def format_report_kr(self, home_name: str, away_name: str, result: dict) -> str:
         """한국어 컨설팅 리포트 포맷."""
         eg = result["expected_goals"]
@@ -1405,6 +1492,60 @@ class DixonColesEngine:
             "=" * 55,
         ]
         return "\n".join(lines)
+
+
+def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str, float]]:
+    """
+    Compute per-team attack/defense strengths from completed matches.
+
+    Strengths are normalised against the league (tournament) average so that
+    attack == 1.0 means "scores the league-average number of goals" and
+    defense == 1.0 means "concedes the league-average number of goals"
+    (defense > 1.0 is a *weaker* defense, per Dixon-Coles convention).
+
+    Returns {team_name: {"attack": float, "defense": float}}.
+    Returns {} if the database file is missing.
+    """
+    import os
+    import sqlite3
+
+    if not os.path.exists(db_path):
+        return {}
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    # Per-team goals for / against across all completed matches (home + away).
+    cur.execute(
+        """
+        SELECT t.name,
+               AVG(CASE WHEN ts.is_home = 1 THEN m.home_score ELSE m.away_score END) AS gf,
+               AVG(CASE WHEN ts.is_home = 1 THEN m.away_score ELSE m.home_score END) AS ga
+        FROM team_stats ts
+        JOIN matches m ON ts.match_id = m.id
+        JOIN teams t   ON ts.team_id  = t.id
+        WHERE m.status = 'completed'
+        GROUP BY t.id
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return {}
+
+    # League average goals per team per match (== avg goals_for == avg goals_against).
+    league_avg = sum(gf for _, gf, _ in rows) / len(rows)
+    if league_avg <= 0:
+        return {}
+
+    return {
+        name: {
+            "attack": gf / league_avg,
+            "defense": ga / league_avg,
+        }
+        for name, gf, ga in rows
+    }
 
 
 if __name__ == "__main__":
