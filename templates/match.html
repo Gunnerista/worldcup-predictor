@@ -76,7 +76,31 @@
 
     <section class="section">
         <h2>Post-Match Review</h2>
-        <p class="narrative">{{ bundle.narrative_post }}</p>
+        <div class="narrative">
+            <div><span class="muted">Model predicted:</span> {{ bundle.narrative_post.predicted }}</div>
+            <div style="margin-top:4px"><span class="muted">Actual result:</span> {{ bundle.flag1 }} {{ bundle.team1 }} {{ bundle.score }} {{ bundle.flag2 }} {{ bundle.team2 }}</div>
+
+            {% if bundle.narrative_post.got_right %}
+            <div style="margin-top:14px; text-transform:uppercase; letter-spacing:.06em; font-size:11px; color:#718096">What the model got right</div>
+            <ul style="list-style:none; margin-top:6px; display:grid; gap:4px">
+                {% for x in bundle.narrative_post.got_right %}<li style="color:#1D9E75">✅ {{ x }}</li>{% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if bundle.narrative_post.missed %}
+            <div style="margin-top:14px; text-transform:uppercase; letter-spacing:.06em; font-size:11px; color:#718096">What the model missed</div>
+            <ul style="list-style:none; margin-top:6px; display:grid; gap:4px">
+                {% for x in bundle.narrative_post.missed %}<li style="color:#EF9F27">❌ {{ x }}</li>{% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if bundle.narrative_post.key_factors %}
+            <div style="margin-top:14px; text-transform:uppercase; letter-spacing:.06em; font-size:11px; color:#718096">Key factors not captured</div>
+            <ul style="list-style:none; margin-top:6px; display:grid; gap:4px">
+                {% for x in bundle.narrative_post.key_factors %}<li style="color:#718096">→ {{ x }}</li>{% endfor %}
+            </ul>
+            {% endif %}
+        </div>
     </section>
 
     {% else %}

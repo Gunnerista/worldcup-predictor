@@ -331,35 +331,76 @@ def generate_pre_match_narrative(b) -> str:
     return " ".join(parts)
 
 
-def generate_post_match_review(b) -> str:
-    """English post-match review comparing prediction to result."""
+def generate_post_match_review(b) -> dict:
+    """Structured post-match review: prediction vs result, what the model got
+    right / missed, and factors it couldn't capture."""
     t1, t2 = b["team1"], b["team2"]
-    parts = []
+    correct = bool(b.get("prediction_correct"))
+    aw = b.get("actual_winner", "Draw")
+    pw = b.get("predicted_winner", "Draw")
+    eg1, eg2 = b["eg1"], b["eg2"]
+    total_xg = eg1 + eg2
+    actual_total = b.get("actual_total_goals", 0)
+    pred = b.get("pred", {"p1": b["p1"], "pdraw": b["pdraw"], "p2": b["p2"]})
+
+    # Predicted outcome summary.
+    if pw == t1:
+        label, pct = f"{t1} WIN", pred["p1"]
+    elif pw == t2:
+        label, pct = f"{t2} WIN", pred["p2"]
+    else:
+        label, pct = "DRAW", pred["pdraw"]
+    top_sl = b["scorelines"][0]["scoreline"] if b["scorelines"] else "n/a"
+    predicted = f"{label} ({pct}%) — most likely {top_sl}"
+    actual = f"{t1} {b.get('actual_score_plain', '')} {t2}"
+
+    # What the model got right.
+    got_right = []
+    if correct:
+        got_right.append("Correct draw prediction" if aw == "Draw"
+                         else f"Correct winner prediction ({aw} WIN)")
+    fav = t1 if eg1 >= eg2 else t2
+    if aw != "Draw" and aw == fav:
+        got_right.append(f"xG edge correctly identified ({t1} {eg1:.2f} vs {t2} {eg2:.2f})")
+    if total_xg < 2.5 and actual_total <= 2:
+        got_right.append("Low-scoring prediction accurate")
+
+    # What the model missed.
+    missed = []
+    if not correct:
+        missed.append(f"Winner incorrect — predicted {pw}, actual {aw}")
     if b["scorelines"]:
-        top = b["scorelines"][0]
-        parts.append(
-            f"Model's most likely scoreline was {top['scoreline']} "
-            f"({top['probability_pct']}%); actual result {b['actual_score_plain']}."
-        )
-    fav = t1 if b["eg1"] >= b["eg2"] else t2
-    parts.append(
-        f"The expected-goals edge pointed to {fav} "
-        f"({b['eg1']:.2f} vs {b['eg2']:.2f})."
-    )
-    if b.get("prediction_correct") is True:
-        parts.append(f"Predicted outcome ({b['predicted_winner']}) was correct.")
-    elif b.get("prediction_correct") is False:
-        parts.append(f"Predicted outcome ({b['predicted_winner']}) missed.")
-    expected_total = round(b["eg1"] + b["eg2"])
-    actual_total = b.get("actual_total_goals")
-    if actual_total is not None:
-        if actual_total > expected_total:
-            parts.append("Goal count exceeded model expectation.")
-        elif actual_total < expected_total:
-            parts.append("Goal count fell below model expectation.")
-        else:
-            parts.append("Goal count matched model expectation.")
-    return " ".join(parts)
+        sl0 = b["scorelines"][0]
+        predicted_total = sl0["home_goals"] + sl0["away_goals"]
+        if actual_total - predicted_total >= 2:
+            missed.append("Scoreline significantly underestimated")
+        elif predicted_total - actual_total >= 2:
+            missed.append("Scoreline significantly overestimated")
+    if pw == "Draw" and aw != "Draw":
+        missed.append("Draw probability overstated")
+
+    # Factors the model could not capture.
+    key_factors = []
+    s1, s2 = b["strength1"], b["strength2"]
+    if s1.get("xg_for") is None or s2.get("xg_for") is None:
+        key_factors.append("Limited 2026 data — attack/defense strength defaulted to 1.0")
+    elo_diff = b.get("elo_diff", 0)
+    stronger = t1 if elo_diff > 0 else t2
+    if abs(elo_diff) >= 100 and aw != stronger:
+        key_factors.append("High ELO gap upset — model underweighted upset probability")
+    if total_xg > 0 and actual_total > 1.5 * total_xg:
+        key_factors.append("Goal count significantly exceeded model expectation")
+    if not key_factors:
+        key_factors.append("No significant model blind spots identified")
+
+    return {
+        "predicted": predicted,
+        "actual": actual,
+        "correct": correct,
+        "got_right": got_right,
+        "missed": missed,
+        "key_factors": key_factors,
+    }
 
 
 TEAM_FLAGS = {
