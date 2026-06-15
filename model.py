@@ -1548,6 +1548,81 @@ def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str,
     }
 
 
+def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
+    """
+    Build live 2026 ELO ratings by replaying completed 2026 matches in
+    chronological order on top of FIFA-ranking-based seeds.
+
+    Unlike app.py's _build_elo_from_history() (which seeds from the broad
+    INITIAL_RATINGS_2026 baseline and replays 2018+2022), this replays ONLY the
+    2026 tournament itself: top 10 seeded from current FIFA ranking, everyone
+    else left at DEFAULT_ELO.
+
+    Returns {team_name: current_elo} for every team with a rating.
+    Returns {} if the database file is missing.
+    """
+    import os
+    import sqlite3
+
+    if not os.path.exists(db_path):
+        return {}
+
+    # FIFA-ranking-based seeds (top 10 only; others fall back to DEFAULT_ELO).
+    seeds = {
+        "Spain":       1950,
+        "France":      1940,
+        "England":     1920,
+        "Brazil":      1910,
+        "Argentina":   1900,
+        "Portugal":    1880,
+        "Netherlands": 1860,
+        "Germany":     1850,
+        "Belgium":     1830,
+        "Uruguay":     1810,
+    }
+
+    def stage_key(s: str | None) -> str:
+        s = (s or "").lower()
+        if "round of 16" in s:
+            return "round_of_16"
+        if "quarter" in s:
+            return "quarter"
+        if "semi" in s:
+            return "semi"
+        if "final" in s:
+            return "final"
+        return "group"
+
+    elo = EloEngine()
+    for team, rating in seeds.items():
+        elo.set_rating(team, rating)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT ht.name AS home, at.name AS away,
+                   m.home_score AS hs, m.away_score AS as_, m.stage AS stage
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.season = 2026 AND m.status = 'completed'
+              AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+            ORDER BY m.kickoff_utc ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for r in rows:
+        hs, as_ = r["hs"], r["as_"]
+        result = "draw" if hs == as_ else ("home_win" if hs > as_ else "away_win")
+        elo.update(r["home"], r["away"], result, stage_key(r["stage"]))
+
+    return dict(elo.ratings)
+
+
 if __name__ == "__main__":
     _run_demo()
 

@@ -38,6 +38,7 @@ import polymarket
 from model import (
     EloEngine, TacticalEngine, PlayerMatchupEngine,
     PatternMatcher, NarrativeEngine, _load_historical_from_db,
+    build_2026_elo,
 )
 
 try:
@@ -209,11 +210,32 @@ def _build_elo_from_history() -> EloEngine:
     return elo
 
 
+def _build_live_elo_2026() -> EloEngine:
+    """Prediction ELO source: live 2026 ratings (replayed from completed 2026
+    results) layered over the INITIAL_RATINGS_2026 baseline.
+
+    A team that has not yet played a 2026 match keeps its INITIAL_RATINGS_2026
+    baseline; a team that has played uses its live 2026-derived rating from
+    model.build_2026_elo().
+    """
+    elo = EloEngine()
+
+    # 1. Baseline fallback for every 2026 qualifier.
+    for team, baseline in INITIAL_RATINGS_2026.items():
+        elo.set_rating(team, baseline)
+
+    # 2. Overlay live 2026 ratings (FIFA-seeded top 10 + replayed results).
+    for team, rating in build_2026_elo().items():
+        elo.set_rating(team, rating)
+
+    return elo
+
+
 def _ensure_engines() -> None:
     global _elo, _pattern_matcher
     if _elo is None:
-        print("[startup] warming ELO from 2018+2022 history...")
-        _elo = _build_elo_from_history()
+        print("[startup] building live 2026 ELO (results replay + baseline fallback)...")
+        _elo = _build_live_elo_2026()
         print(f"[startup] ELO ready ({len(_elo.ratings)} teams)")
     if _pattern_matcher is None:
         print("[startup] loading PatternMatcher historical dataset...")
