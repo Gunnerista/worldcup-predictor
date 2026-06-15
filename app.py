@@ -1,2 +1,461 @@
-# app.py — Flask backend entry point
-# TODO: implement routes for index, match detail, SSE stream, and Polymarket comparison.
+"""
+app.py — Flask web interface for worldcup-predictor.
+
+Routes:
+  GET  /                     → today's match list (with model preview %)
+  GET  /match/<id>           → PRE-MATCH consulting report
+  GET  /stream/<id>          → Server-Sent Events (60s polling)
+  GET  /live/<id>            → LIVE view (redirects to /match/<id> for now)
+  GET  /post/<id>            → POST-MATCH view (redirects)
+  POST /notes/<id>           → save user notes
+
+HARD CONTRACT: every number rendered is COMPUTED by a model.py engine.
+No raw BALLDONTLIE field is sent to the template as a probability,
+percentage, similarity, motivation, or impact score.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import time
+from datetime import date
+from typing import Optional
+
+from flask import (
+    Flask, render_template, request, Response,
+    redirect, url_for, abort,
+)
+
+import database
+import data_pipeline
+import polymarket
+from model import (
+    EloEngine, TacticalEngine, PlayerMatchupEngine,
+    PatternMatcher, NarrativeEngine, _load_historical_from_db,
+)
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+app = Flask(__name__)
+
+# --------------------------------------------------------------------------
+# Engine state (warmed on first request)
+# --------------------------------------------------------------------------
+
+_elo: Optional[EloEngine] = None
+_pattern_matcher: Optional[PatternMatcher] = None
+
+
+def _stage_key(stage_str: Optional[str]) -> str:
+    s = (stage_str or "").lower()
+    if "group" in s:        return "group"
+    if "round of 16" in s:  return "round_of_16"
+    if "quarter" in s:      return "quarter"
+    if "semi" in s:         return "semi"
+    if "final" in s:        return "final"
+    return "group"
+
+
+def _build_elo_from_history() -> EloEngine:
+    """Replay 2018+2022 completed matches to warm ELO ratings."""
+    elo = EloEngine()
+    conn = database.get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT m.id, ht.name AS home, at.name AS away,
+                   m.home_score, m.away_score, m.stage
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.status = 'completed' AND m.season IN (2018, 2022)
+              AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL
+            ORDER BY m.kickoff_utc ASC
+        """).fetchall()
+    finally:
+        conn.close()
+
+    for r in rows:
+        hs, as_ = r["home_score"], r["away_score"]
+        result = "draw" if hs == as_ else ("home_win" if hs > as_ else "away_win")
+        elo.update(r["home"], r["away"], result, _stage_key(r["stage"]))
+    return elo
+
+
+def _ensure_engines() -> None:
+    global _elo, _pattern_matcher
+    if _elo is None:
+        print("[startup] warming ELO from 2018+2022 history...")
+        _elo = _build_elo_from_history()
+        print(f"[startup] ELO ready ({len(_elo.ratings)} teams)")
+    if _pattern_matcher is None:
+        print("[startup] loading PatternMatcher historical dataset...")
+        _pattern_matcher = PatternMatcher(_load_historical_from_db())
+        print(f"[startup] PatternMatcher ready ({len(_pattern_matcher.historical)} matches)")
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+def _recent_team_stats(conn, team_name: str) -> dict:
+    """Aggregated mean of last-3 completed matches for a team."""
+    row = conn.execute("""
+        SELECT
+            AVG(ts.possession)    AS possession_pct,
+            AVG(ts.xg_total)      AS xg_total,
+            AVG(ts.shots_total)   AS shots_total,
+            AVG(ts.shots_on_target) AS shots_on_target,
+            COUNT(*)              AS games
+        FROM team_stats ts
+        JOIN teams t ON t.id = ts.team_id
+        JOIN matches m ON m.id = ts.match_id
+        WHERE t.name = ? AND m.status = 'completed'
+        ORDER BY m.kickoff_utc DESC
+        LIMIT 3
+    """, (team_name,)).fetchone()
+
+    if not row or not row["games"]:
+        return {
+            "possession_pct":  50.0,
+            "xg_total":        0.0,
+            "shots_total":     0.0,
+            "shots_on_target": 0.0,
+        }
+
+    return {
+        "possession_pct":  float(row["possession_pct"]    or 50),
+        "xg_total":        float(row["xg_total"]          or 0),
+        "shots_total":     float(row["shots_total"]       or 0),
+        "shots_on_target": float(row["shots_on_target"]   or 0),
+    }
+
+
+def _zone_proxy(recent: dict) -> dict:
+    """Synthesize a plausible zone-threat distribution from the recent average.
+    Without per-shot location aggregated per zone, we distribute shots evenly
+    and place 1 goal in the busiest zone. This is a deterministic placeholder
+    until the data_pipeline computes per-zone aggregation.
+    """
+    shots = int(recent.get("shots_total", 0) or 0)
+    on_target = int(recent.get("shots_on_target", 0) or 0)
+    return {
+        "shots_against_by_zone": {"left": shots // 3, "center": shots - 2 * (shots // 3), "right": shots // 3},
+        "goals_against_by_zone": {"left": 0, "center": 1 if on_target > 4 else 0, "right": 0},
+        "possession_pct": recent.get("possession_pct", 50.0),
+    }
+
+
+def _key_players_for(home_name: str, away_name: str) -> list:
+    """Top 3 players across the two teams (by historical impact_score)."""
+    engine = PlayerMatchupEngine()
+    conn = database.get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                p.id AS player_id, p.name,
+                AVG(ps.expected_goals)    AS expected_goals,
+                AVG(ps.expected_assists)  AS expected_assists,
+                AVG(ps.passes_accurate)   AS passes_accurate,
+                AVG(ps.rating)            AS rating,
+                COUNT(*)                  AS games
+            FROM player_stats ps
+            JOIN players p ON p.id = ps.player_id
+            JOIN teams t ON t.id = ps.team_id
+            WHERE t.name IN (?, ?)
+              AND p.name NOT LIKE 'Player #%'
+            GROUP BY p.id
+            HAVING games >= 1
+            ORDER BY AVG(ps.expected_goals) DESC
+            LIMIT 25
+        """, (home_name, away_name)).fetchall()
+    finally:
+        conn.close()
+
+    # Reconstruct a `passes_total` proxy assuming 85% pass accuracy (WC-level baseline).
+    # This is necessary because the schema only stores `passes_accurate`, but the engine's
+    # impact formula uses pass_rate = accurate / total. With this proxy, pass_rate ~= 0.85
+    # uniformly, so the differentiator becomes xG / xA / volume, which is what we want.
+    PASS_ACCURACY_PROXY = 0.85
+    candidates = []
+    for r in rows:
+        passes_acc = float(r["passes_accurate"] or 0)
+        candidates.append({
+            "player_id":        r["player_id"],
+            "name":             r["name"],
+            "expected_goals":   float(r["expected_goals"]    or 0),
+            "expected_assists": float(r["expected_assists"]  or 0),
+            "passes_accurate":  passes_acc,
+            "passes_total":     passes_acc / PASS_ACCURACY_PROXY if passes_acc > 0 else 0,
+            "ball_recoveries":  0,
+            "key_passes":       float(r["expected_assists"]  or 0),  # use xA as a key-pass proxy
+        })
+    return engine.get_key_players(team_id=None, match_stats=candidates, top_n=3)
+
+
+def _build_pre_match_bundle(match: dict) -> dict:
+    """Run every engine for a match and return a render-ready bundle."""
+    _ensure_engines()
+    tactical = TacticalEngine()
+    player_engine = PlayerMatchupEngine()
+    narrator = NarrativeEngine()
+
+    home_name = (match.get("home_team") or {}).get("name", "Home")
+    away_name = (match.get("away_team") or {}).get("name", "Away")
+    home_cc   = (match.get("home_team") or {}).get("country_code")
+    away_cc   = (match.get("away_team") or {}).get("country_code")
+
+    home_elo = _elo.get_rating(home_name)
+    away_elo = _elo.get_rating(away_name)
+
+    # ELO with 2026 host/proximity bonuses (assume US-side host for demo)
+    elo_result = _elo.get_win_probability_with_context(
+        home_elo, away_elo,
+        home_country=home_cc, away_country=away_cc, host_country="USA",
+    )
+
+    conn = database.get_connection()
+    try:
+        home_recent = _recent_team_stats(conn, home_name)
+        away_recent = _recent_team_stats(conn, away_name)
+    finally:
+        conn.close()
+
+    home_prev = tactical.analyze_previous_match(home_name, _zone_proxy(home_recent))
+    away_prev = tactical.analyze_previous_match(away_name, _zone_proxy(away_recent))
+
+    poss_impact = tactical.calculate_possession_impact(
+        home_recent["possession_pct"], away_recent["possession_pct"],
+    )
+
+    key_players = _key_players_for(home_name, away_name)
+
+    xg_diff = round(home_recent["xg_total"] - away_recent["xg_total"], 2)
+
+    current_features = {
+        "xg_diff":              xg_diff,
+        "elo_diff":             home_elo - away_elo,
+        "possession_diff":      home_recent["possession_pct"] - away_recent["possession_pct"],
+        "shots_diff":           home_recent["shots_total"]    - away_recent["shots_total"],
+        "fatigue_diff":         0,
+        "elimination_pressure": 0,
+    }
+    similar_matches = _pattern_matcher.find_similar_matches(current_features, top_n=3)
+    upset_pct = _pattern_matcher.calculate_upset_probability(similar_matches)
+
+    motiv_home = player_engine.world_cup_motivation_bonus(
+        {"name": home_name},
+        {"must_win": False, "already_qualified": False, "elo_diff": home_elo - away_elo},
+    )
+    motiv_away = player_engine.world_cup_motivation_bonus(
+        {"name": away_name},
+        {"must_win": False, "already_qualified": False, "elo_diff": away_elo - home_elo},
+    )
+
+    reasons = narrator.generate_reasons(
+        elo_result, poss_impact, {"xg_diff": xg_diff},
+    )
+    key_lines = narrator.generate_key_matchups(key_players)
+    warnings_list = narrator.generate_warning(similar_matches, poss_impact, upset_pct)
+    warnings_list.append(f"⚠️ 역전 가능성 {upset_pct:.0f}%")
+
+    # Polymarket: best-effort, never block the page
+    poly_qual = poly_group = None
+    try:
+        poly_qual = polymarket.get_qualification_odds(home_name, round="16")
+    except Exception as e:
+        print(f"polymarket qual error: {e}")
+    try:
+        poly_group = polymarket.get_group_winner_odds(home_name)
+    except Exception as e:
+        print(f"polymarket group error: {e}")
+
+    return {
+        "match":         match,
+        "home_name":     home_name,
+        "away_name":     away_name,
+        "home_pct":      round(elo_result["home"] * 100),
+        "draw_pct":      round(elo_result["draw"] * 100),
+        "away_pct":      round(elo_result["away"] * 100),
+        "elo_diff":      round(elo_result["elo_diff"]),
+        "home_elo":      round(home_elo),
+        "away_elo":      round(away_elo),
+        "home_prev":     home_prev,
+        "away_prev":     away_prev,
+        "poss_impact":   poss_impact,
+        "key_players":   key_players,
+        "key_lines":     key_lines,
+        "similar_matches": similar_matches,
+        "upset_pct":     upset_pct,
+        "motiv_home":    motiv_home,
+        "motiv_away":    motiv_away,
+        "reasons":       reasons,
+        "warnings":      warnings_list,
+        "xg_diff":       xg_diff,
+        "home_recent":   home_recent,
+        "away_recent":   away_recent,
+        "poly_qual_pct": round(poly_qual * 100) if poly_qual is not None else None,
+        "poly_group_pct": round(poly_group * 100) if poly_group is not None else None,
+    }
+
+
+def _load_match_from_db_or_api(match_id: int) -> Optional[dict]:
+    conn = database.get_connection()
+    try:
+        r = conn.execute("""
+            SELECT m.*, ht.name AS home_name, ht.country_code AS home_cc, ht.id AS home_id,
+                   at.name AS away_name, at.country_code AS away_cc, at.id AS away_id
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.id = ?
+        """, (match_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if r:
+        return {
+            "id":         r["id"],
+            "home_team":  {"id": r["home_id"], "name": r["home_name"], "country_code": r["home_cc"]},
+            "away_team":  {"id": r["away_id"], "name": r["away_name"], "country_code": r["away_cc"]},
+            "datetime":   r["kickoff_utc"],
+            "home_score": r["home_score"],
+            "away_score": r["away_score"],
+            "status":     r["status"],
+            "stage":      {"name": r["stage"]},
+            "group":      {"name": r["group_name"]},
+        }
+    # Fallback: API search
+    try:
+        all_matches = data_pipeline.fetch_matches([2026])
+    except Exception:
+        return None
+    return next((m for m in all_matches if m.get("id") == match_id), None)
+
+
+# --------------------------------------------------------------------------
+# Routes
+# --------------------------------------------------------------------------
+
+@app.route("/")
+def index():
+    _ensure_engines()
+    try:
+        matches = data_pipeline.get_today_matches()
+    except Exception as e:
+        print(f"index: today fetch error: {e}")
+        matches = []
+
+    enriched = []
+    for m in matches:
+        home = (m.get("home_team") or {}).get("name", "?")
+        away = (m.get("away_team") or {}).get("name", "?")
+        h_elo = _elo.get_rating(home)
+        a_elo = _elo.get_rating(away)
+        probs = _elo.get_win_probability(h_elo, a_elo)
+        enriched.append({
+            "id":         m.get("id"),
+            "home_name":  home,
+            "away_name":  away,
+            "home_pct":   round(probs["home"] * 100),
+            "draw_pct":   round(probs["draw"] * 100),
+            "away_pct":   round(probs["away"] * 100),
+            "status":     m.get("status"),
+            "kickoff":    m.get("datetime"),
+            "home_score": m.get("home_score"),
+            "away_score": m.get("away_score"),
+            "group":      (m.get("group") or {}).get("name", ""),
+        })
+
+    return render_template("index.html", matches=enriched, today=date.today().isoformat())
+
+
+@app.route("/match/<int:match_id>")
+def match_detail(match_id: int):
+    match = _load_match_from_db_or_api(match_id)
+    if not match:
+        abort(404)
+    bundle = _build_pre_match_bundle(match)
+
+    # Phase detection: pre / live / post
+    status = (match.get("status") or "").lower()
+    if status in {"live", "in_progress"}:
+        phase = "live"
+    elif status in {"completed", "ft", "finished"}:
+        phase = "post"
+    else:
+        phase = "pre"
+
+    return render_template("match.html", bundle=bundle, phase=phase, match_id=match_id)
+
+
+@app.route("/stream/<int:match_id>")
+def stream(match_id: int):
+    """SSE: emit current match snapshot every 60 seconds.
+
+    Real event-driven recompute (goal/card -> immediate push) would require a
+    background ingest worker. For now we poll the DB on each tick.
+    """
+    def generate():
+        for _ in range(60):  # ~1 hour max stream lifetime
+            try:
+                conn = database.get_connection()
+                row = conn.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
+                conn.close()
+                if row is not None:
+                    payload = {
+                        "home_score":  row["home_score"],
+                        "away_score":  row["away_score"],
+                        "status":      row["status"],
+                        "ts":          time.time(),
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                else:
+                    yield "data: {}\n\n"
+            except GeneratorExit:
+                break
+            except Exception as e:
+                yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+            time.sleep(60)
+    return Response(generate(), mimetype="text/event-stream")
+
+
+@app.route("/live/<int:match_id>")
+def live(match_id: int):
+    return redirect(url_for("match_detail", match_id=match_id))
+
+
+@app.route("/post/<int:match_id>")
+def post_match(match_id: int):
+    return redirect(url_for("match_detail", match_id=match_id))
+
+
+@app.route("/notes/<int:match_id>", methods=["POST"])
+def save_notes(match_id: int):
+    tactics          = (request.form.get("tactics") or "").strip()
+    player_condition = (request.form.get("player_condition") or "").strip()
+    psychology       = (request.form.get("psychology") or "").strip()
+    other            = (request.form.get("other") or "").strip()
+
+    conn = database.get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO user_notes (match_id, tactics, player_condition, psychology, other)
+            VALUES (?, ?, ?, ?, ?)
+        """, (match_id, tactics, player_condition, psychology, other))
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for("match_detail", match_id=match_id))
+
+
+# --------------------------------------------------------------------------
+# Entrypoint
+# --------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    database.init_db()
+    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)

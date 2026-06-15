@@ -1,1 +1,188 @@
-<!-- templates/match.html — single match detail (pre / live / post) -->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ bundle.home_name }} vs {{ bundle.away_name }}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+</head>
+<body data-match-id="{{ match_id }}" data-phase="{{ phase }}">
+
+<header class="match-hero">
+    <div class="hero-inner">
+        <a href="/" class="back-link">← 오늘 경기 목록</a>
+        <h1>{{ bundle.home_name }} <span class="vs-light">vs</span> {{ bundle.away_name }}</h1>
+        <div class="kickoff-line">
+            {% if bundle.match.datetime %}{{ bundle.match.datetime[:10] }} {{ bundle.match.datetime[11:16] }} UTC{% endif %}
+            {% if bundle.match.stage %} &middot; {{ bundle.match.stage.name }}{% endif %}
+            {% if phase == 'live' %} &middot; <span class="badge live-badge">LIVE</span>{% endif %}
+            {% if phase == 'post' %} &middot; <span class="badge complete-badge">FT {{ bundle.match.home_score }}-{{ bundle.match.away_score }}</span>{% endif %}
+        </div>
+    </div>
+</header>
+
+<main class="container">
+
+    <!-- 1. 메인 확률 -->
+    <section class="probs-section">
+        <div class="prob-col home">
+            <div class="prob-team">{{ bundle.home_name }}</div>
+            <div class="prob-val">{{ bundle.home_pct }}<small>%</small></div>
+            <div class="prob-sub">승</div>
+        </div>
+        <div class="prob-divider"></div>
+        <div class="prob-col draw">
+            <div class="prob-team">무승부</div>
+            <div class="prob-val">{{ bundle.draw_pct }}<small>%</small></div>
+            <div class="prob-sub">Draw</div>
+        </div>
+        <div class="prob-divider"></div>
+        <div class="prob-col away">
+            <div class="prob-team">{{ bundle.away_name }}</div>
+            <div class="prob-val">{{ bundle.away_pct }}<small>%</small></div>
+            <div class="prob-sub">승</div>
+        </div>
+    </section>
+
+    <div class="grid">
+
+        <!-- 2. 이전 경기 복기 -->
+        <section class="card">
+            <h2>이전 경기 복기</h2>
+            <div class="recap-line">
+                <strong>{{ bundle.home_name }}</strong> — {{ bundle.home_prev.possession_pattern }}, {{ bundle.home_prev.weakest_zone_kr }} 측면 위협 비중 <b class="warn">{{ bundle.home_prev.vulnerability_score }}%</b>
+            </div>
+            <div class="recap-line">
+                <strong>{{ bundle.away_name }}</strong> — {{ bundle.away_prev.possession_pattern }}, {{ bundle.away_prev.weakest_zone_kr }} 측면 위협 비중 <b class="warn">{{ bundle.away_prev.vulnerability_score }}%</b>
+            </div>
+        </section>
+
+        <!-- 3. 이번 경기 핵심 -->
+        <section class="card">
+            <h2>이번 경기 핵심</h2>
+            <p class="lead">{{ bundle.poss_impact.note }}</p>
+            <div class="meta">ELO 격차 {{ bundle.elo_diff }} ({{ bundle.home_elo }} vs {{ bundle.away_elo }})</div>
+        </section>
+
+        <!-- 4. 모델 근거 3가지 -->
+        <section class="card full">
+            <h2>모델 근거 3가지</h2>
+            <ol class="reasons">
+                {% for r in bundle.reasons %}
+                <li>{{ r }}</li>
+                {% endfor %}
+            </ol>
+        </section>
+
+        <!-- 5. 주목할 선수 TOP 3 -->
+        <section class="card full">
+            <h2>주목할 선수 TOP 3</h2>
+            <ol class="players">
+                {% for line in bundle.key_lines %}
+                <li>{{ line }}</li>
+                {% endfor %}
+            </ol>
+        </section>
+
+        <!-- 6. 유사 과거 경기 -->
+        <section class="card full">
+            <h2>유사 과거 경기</h2>
+            <ol class="similar">
+                {% for s in bundle.similar_matches %}
+                <li>
+                    <div class="row">
+                        <span class="sim-label">{{ s.label }}</span>
+                        <span class="sim-pct">{{ s.similarity_pct|round|int }}% 유사</span>
+                    </div>
+                    <p class="lesson">{{ s.lesson }}</p>
+                </li>
+                {% endfor %}
+            </ol>
+        </section>
+
+        <!-- 7. 경고 시그널 -->
+        <section class="card warnings full">
+            <h2>경고 시그널</h2>
+            <ul>
+                {% for w in bundle.warnings %}
+                <li>{{ w }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+
+        <!-- 8. 월드컵 특수 요소 -->
+        <section class="card full">
+            <h2>월드컵 특수 요소</h2>
+            <div class="motiv">
+                <div class="motiv-row">
+                    <span class="t">{{ bundle.home_name }}</span>
+                    <span class="note">{{ bundle.motiv_home.explanation }}</span>
+                    <span class="bonus">{{ '%+.1f' % (bundle.motiv_home.bonus * 100) }}%p</span>
+                </div>
+                <div class="motiv-row">
+                    <span class="t">{{ bundle.away_name }}</span>
+                    <span class="note">{{ bundle.motiv_away.explanation }}</span>
+                    <span class="bonus">{{ '%+.1f' % (bundle.motiv_away.bonus * 100) }}%p</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 9. Polymarket -->
+        <section class="card full">
+            <h2>Polymarket 시장 배당</h2>
+            <div class="poly-grid">
+                <div class="poly-cell">
+                    <div class="poly-label">{{ bundle.home_name }} 16강 진출</div>
+                    <div class="poly-val">{% if bundle.poly_qual_pct is not none %}{{ bundle.poly_qual_pct }}%{% else %}—{% endif %}</div>
+                </div>
+                <div class="poly-cell">
+                    <div class="poly-label">{{ bundle.home_name }} 조 우승</div>
+                    <div class="poly-val">{% if bundle.poly_group_pct is not none %}{{ bundle.poly_group_pct }}%{% else %}—{% endif %}</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 10. 내 메모 -->
+        <section class="card full notes">
+            <h2>내 메모</h2>
+            <form method="post" action="/notes/{{ match_id }}">
+                <label>감독 전술 변화
+                    <textarea name="tactics" rows="2" placeholder="예: 4-2-3-1 변경 가능성, 풀백 공격가담..."></textarea>
+                </label>
+                <label>선수 컨디션
+                    <textarea name="player_condition" rows="2" placeholder="예: 손흥민 햄스트링 회복 후 첫 풀타임..."></textarea>
+                </label>
+                <label>심리적 요소
+                    <textarea name="psychology" rows="2" placeholder="예: 직전 경기 패배 분위기, 홈팬 환경..."></textarea>
+                </label>
+                <label>기타
+                    <textarea name="other" rows="2" placeholder="예: 심판 성향, 날씨..."></textarea>
+                </label>
+                <button type="submit">메모 저장</button>
+            </form>
+        </section>
+
+    </div>
+
+    <!-- LIVE-only widgets (rendered for the live phase) -->
+    {% if phase == 'live' %}
+    <section class="card full live-widgets">
+        <h2>실시간 차트</h2>
+        <div class="chart-row">
+            <div class="chart-wrap"><canvas id="momentumChart"></canvas></div>
+            <div class="chart-wrap"><canvas id="possessionChart"></canvas></div>
+        </div>
+    </section>
+    {% endif %}
+
+</main>
+
+<footer class="foot">
+    <p>모든 수치는 ELO + Tactical + Player + Pattern + Narrative 엔진 계산 결과</p>
+</footer>
+
+<script src="{{ url_for('static', filename='charts.js') }}"></script>
+</body>
+</html>
