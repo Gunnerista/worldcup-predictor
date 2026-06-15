@@ -1345,7 +1345,10 @@ class DixonColesEngine:
         lam, mu = self._expected_goals(
             home_elo, away_elo, ha, hd, aa, ad, neutral_venue
         )
+        return self._assemble(lam, mu, top_n)
 
+    def _assemble(self, lam: float, mu: float, top_n: int = 5) -> dict:
+        """Build the full prediction bundle from final λ_home / λ_away."""
         matrix = self.scoreline_matrix(lam, mu)
 
         home_win = sum(p for (i, j), p in matrix.items() if i > j)
@@ -1495,6 +1498,42 @@ class DixonColesEngine:
             return 1.0
         return max(0.7, min(1.4, recent / avg))
 
+    def apply_user_notes(self, team_name, notes_dict, base_lambda):
+        """
+        Adjust a team's λ from operator notes (additive, applied last).
+
+        notes_dict keys (all optional):
+          key_player_out : list of names -> -0.08 each, total capped at -0.25
+          tactical_note  : str           -> -0.10 if it contains "수비",
+                                            +0.08 if it contains "공격"
+          condition      : "negative" -> -0.07 | "positive" -> +0.07 | else 0
+
+        Returns the adjusted λ, clamped to [0.3, 3.0]. team_name is accepted for
+        symmetry/logging but does not affect the math.
+        """
+        if not notes_dict:
+            return base_lambda
+
+        lam = base_lambda
+
+        out = notes_dict.get("key_player_out") or []
+        if out:
+            lam += max(-0.25, -0.08 * len(out))
+
+        tac = notes_dict.get("tactical_note") or ""
+        if "수비" in tac:
+            lam -= 0.10
+        if "공격" in tac:
+            lam += 0.08
+
+        cond = notes_dict.get("condition")
+        if cond == "negative":
+            lam -= 0.07
+        elif cond == "positive":
+            lam += 0.07
+
+        return max(0.3, min(3.0, lam))
+
     def predict_from_db(
         self,
         home_name: str,
@@ -1505,6 +1544,8 @@ class DixonColesEngine:
         neutral_venue: bool = True,
         top_n: int = 5,
         group_name: str | None = None,
+        home_notes: dict | None = None,
+        away_notes: dict | None = None,
     ) -> dict:
         """
         Like predict(), but auto-loads attack/defense strengths from the DB by
@@ -1545,16 +1586,19 @@ class DixonColesEngine:
             except Exception:
                 sit_away = None
 
-        result = self.predict(
-            home_elo=home_elo,
-            away_elo=away_elo,
-            home_attack=ha,
-            home_defense=hd,
-            away_attack=aa,
-            away_defense=ad,
-            neutral_venue=neutral_venue,
-            top_n=top_n,
+        lam, mu = self._expected_goals(
+            home_elo, away_elo, ha, hd, aa, ad, neutral_venue
         )
+
+        # Operator notes: additive λ override applied after the ELO/strength
+        # model (key player out, tactical posture, condition).
+        base_lam, base_mu = lam, mu
+        if home_notes:
+            lam = self.apply_user_notes(home_name, home_notes, lam)
+        if away_notes:
+            mu = self.apply_user_notes(away_name, away_notes, mu)
+
+        result = self._assemble(lam, mu, top_n)
         result["strength_source"] = {
             "home": "db" if home is not None else "fallback(1.0)",
             "away": "db" if away is not None else "fallback(1.0)",
@@ -1564,6 +1608,10 @@ class DixonColesEngine:
             "away": round(away_adj, 3),
         }
         result["situation"] = {"home": sit_home, "away": sit_away}
+        result["notes_adjustment"] = {
+            "home": round(lam - base_lam, 3),
+            "away": round(mu - base_mu, 3),
+        }
         return result
 
     def format_report_kr(self, home_name: str, away_name: str, result: dict) -> str:
