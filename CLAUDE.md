@@ -197,10 +197,10 @@ FLASK_DEBUG=True
 - [x] Step 4 — `.env` 템플릿
 - [x] Step 5 — `.gitignore`
 - [x] Step 6 — GitHub 초기 커밋 + push (remote: `https://github.com/Gunnerista/worldcup-predictor.git`)
-- [ ] Step 7 — `database.py` 스키마 정의
-- [ ] Step 8 — `data_pipeline.py` BALLDONTLIE 클라이언트 + 백필
+- [x] Step 7 — `database.py` 스키마 정의 (11 tables, 6 indexes, FK enabled)
+- [ ] Step 8 — `data_pipeline.py` BALLDONTLIE 클라이언트 + 백필 (스모크 테스트만 완료)
 - [ ] Step 9 — `model.py` ELO 베이스라인 + XGBoost + Platt
-- [ ] Step 10 — `polymarket.py` 배당 조회
+- [x] Step 10 — `polymarket.py` 토너먼트 마켓 조회 (조 우승 / 16강·8강·4강 진출 / 시상 / props)
 - [ ] Step 11 — `app.py` 라우트 + SSE
 - [ ] Step 12 — `templates/` + `static/` UI 구현
 - [ ] Step 13 — 사용자 메모 입력 → 모델 후처리 반영
