@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 import traceback
@@ -34,12 +34,10 @@ from werkzeug.exceptions import HTTPException
 
 import database
 import data_pipeline
-import polymarket
 from model import (
-    EloEngine, TacticalEngine, PlayerMatchupEngine,
-    PatternMatcher, NarrativeEngine, _load_historical_from_db,
+    EloEngine, PatternMatcher, _load_historical_from_db,
     build_2026_elo, DixonColesEngine, save_prediction, compute_brier_score,
-    INITIAL_RATINGS_2026,
+    INITIAL_RATINGS_2026, _team_strengths_from_db,
 )
 
 try:
@@ -217,67 +215,6 @@ def _recent_team_stats(conn, team_name: str) -> dict:
     }
 
 
-def _zone_proxy(recent: dict) -> dict:
-    """Synthesize a plausible zone-threat distribution from the recent average.
-    Without per-shot location aggregated per zone, we distribute shots evenly
-    and place 1 goal in the busiest zone. This is a deterministic placeholder
-    until the data_pipeline computes per-zone aggregation.
-    """
-    shots = int(recent.get("shots_total", 0) or 0)
-    on_target = int(recent.get("shots_on_target", 0) or 0)
-    return {
-        "shots_against_by_zone": {"left": shots // 3, "center": shots - 2 * (shots // 3), "right": shots // 3},
-        "goals_against_by_zone": {"left": 0, "center": 1 if on_target > 4 else 0, "right": 0},
-        "possession_pct": recent.get("possession_pct", 50.0),
-    }
-
-
-def _key_players_for(home_name: str, away_name: str) -> list:
-    """Top 3 players across the two teams (by historical impact_score)."""
-    engine = PlayerMatchupEngine()
-    conn = database.get_connection()
-    try:
-        rows = conn.execute("""
-            SELECT
-                p.id AS player_id, p.name,
-                AVG(ps.expected_goals)    AS expected_goals,
-                AVG(ps.expected_assists)  AS expected_assists,
-                AVG(ps.passes_accurate)   AS passes_accurate,
-                AVG(ps.rating)            AS rating,
-                COUNT(*)                  AS games
-            FROM player_stats ps
-            JOIN players p ON p.id = ps.player_id
-            JOIN teams t ON t.id = ps.team_id
-            WHERE t.name IN (?, ?)
-              AND p.name NOT LIKE 'Player #%'
-            GROUP BY p.id, p.name
-            ORDER BY AVG(ps.expected_goals) DESC
-            LIMIT 25
-        """, (home_name, away_name)).fetchall()
-    finally:
-        conn.close()
-
-    # Reconstruct a `passes_total` proxy assuming 85% pass accuracy (WC-level baseline).
-    # This is necessary because the schema only stores `passes_accurate`, but the engine's
-    # impact formula uses pass_rate = accurate / total. With this proxy, pass_rate ~= 0.85
-    # uniformly, so the differentiator becomes xG / xA / volume, which is what we want.
-    PASS_ACCURACY_PROXY = 0.85
-    candidates = []
-    for r in rows:
-        passes_acc = float(r["passes_accurate"] or 0)
-        candidates.append({
-            "player_id":        r["player_id"],
-            "name":             r["name"],
-            "expected_goals":   float(r["expected_goals"]    or 0),
-            "expected_assists": float(r["expected_assists"]  or 0),
-            "passes_accurate":  passes_acc,
-            "passes_total":     passes_acc / PASS_ACCURACY_PROXY if passes_acc > 0 else 0,
-            "ball_recoveries":  0,
-            "key_passes":       float(r["expected_assists"]  or 0),  # use xA as a key-pass proxy
-        })
-    return engine.get_key_players(team_id=None, match_stats=candidates, top_n=3)
-
-
 def _load_user_notes(conn, match_id):
     """Latest user_notes row -> a notes_dict for DixonColesEngine.apply_user_notes.
 
@@ -314,12 +251,120 @@ def _load_user_notes(conn, match_id):
     return (notes or None), None
 
 
-def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
-    """Run every engine for a match and return a render-ready bundle.
+def _team_code(name: str) -> str:
+    """Short uppercase code for the math block (e.g. 'Belgium' -> 'BEL')."""
+    letters = "".join(c for c in (name or "") if c.isalpha())
+    return letters[:3].upper() or "TM"
 
-    Win/draw/loss now comes from DixonColesEngine (group situation, player xG and
-    user notes folded into λ); ELO is kept only for the displayed rating numbers
-    and the narrator's reason text. Returns None if the match is unknown.
+
+def _match_strength(conn, team_name):
+    """Average xG for / against for a team across all matches with xG data.
+    Returns (xg_for, xg_against) — either may be None when no xG exists."""
+    try:
+        row = conn.execute(
+            """
+            SELECT AVG(ts.xg_total)  AS xf,
+                   AVG(opp.xg_total) AS xa
+            FROM team_stats ts
+            JOIN team_stats opp ON opp.match_id = ts.match_id AND opp.team_id != ts.team_id
+            JOIN teams t ON t.id = ts.team_id
+            WHERE t.name = ?
+            """,
+            (team_name,),
+        ).fetchone()
+    except Exception:
+        return None, None
+    if not row:
+        return None, None
+    return row["xf"], row["xa"]
+
+
+def _matchday(conn, group_name, kickoff):
+    """Group matchday (1-3) from chronological order; None for knockout."""
+    if not group_name or not kickoff:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT kickoff_utc FROM matches WHERE season = 2026 AND group_name = ? "
+            "ORDER BY kickoff_utc",
+            (group_name,),
+        ).fetchall()
+    except Exception:
+        return None
+    ks = [r["kickoff_utc"] for r in rows]
+    if kickoff in ks:
+        return ks.index(kickoff) // 2 + 1   # 4-team group: 2 matches / matchday
+    return None
+
+
+def generate_pre_match_narrative(b) -> str:
+    """English pre-match analysis assembled from model outputs."""
+    t1, t2 = b["team1"], b["team2"]
+    elo_diff = b["elo_diff"]
+    total_xg = b["eg1"] + b["eg2"]
+    stronger, sp = (t1, b["p1"]) if b["p1"] >= b["p2"] else (t2, b["p2"])
+    parts = []
+    if abs(elo_diff) >= 1:
+        parts.append(
+            f"ELO gap of {abs(elo_diff)} points favours {stronger}, whom the model "
+            f"gives a {sp}% win probability."
+        )
+    else:
+        parts.append(
+            f"The sides are level on ELO; the model sees a near-even contest "
+            f"({b['p1']}% / {b['p2']}%)."
+        )
+    parts.append(f"Draw probability sits at {b['pdraw']}%.")
+    pace = "low-scoring" if total_xg < 2.69 else "open, high-tempo"
+    parts.append(
+        f"Combined expected goals total {total_xg:.2f}, "
+        f"{'below' if total_xg < 2.69 else 'above'} the 2.69 tournament average — "
+        f"a {pace} match is expected."
+    )
+    if b["scorelines"]:
+        top = b["scorelines"][0]
+        parts.append(f"Most likely scoreline: {top['scoreline']} ({top['probability_pct']}%).")
+    parts.append(f"Pattern-based upset probability: {b['upset_pct']:.0f}%.")
+    return " ".join(parts)
+
+
+def generate_post_match_review(b) -> str:
+    """English post-match review comparing prediction to result."""
+    t1, t2 = b["team1"], b["team2"]
+    parts = []
+    if b["scorelines"]:
+        top = b["scorelines"][0]
+        parts.append(
+            f"Model's most likely scoreline was {top['scoreline']} "
+            f"({top['probability_pct']}%); actual result {b['actual_score_plain']}."
+        )
+    fav = t1 if b["eg1"] >= b["eg2"] else t2
+    parts.append(
+        f"The expected-goals edge pointed to {fav} "
+        f"({b['eg1']:.2f} vs {b['eg2']:.2f})."
+    )
+    if b.get("prediction_correct") is True:
+        parts.append(f"Predicted outcome ({b['predicted_winner']}) was correct.")
+    elif b.get("prediction_correct") is False:
+        parts.append(f"Predicted outcome ({b['predicted_winner']}) missed.")
+    expected_total = round(b["eg1"] + b["eg2"])
+    actual_total = b.get("actual_total_goals")
+    if actual_total is not None:
+        if actual_total > expected_total:
+            parts.append("Goal count exceeded model expectation.")
+        elif actual_total < expected_total:
+            parts.append("Goal count fell below model expectation.")
+        else:
+            parts.append("Goal count matched model expectation.")
+    return " ".join(parts)
+
+
+def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
+    """Render-ready bundle for the MATCHIQ match page (pre + post modes).
+
+    W/D/L, expected goals, scorelines and group situation come from
+    DixonColesEngine; ELO is kept for the rating display. Returns None if the
+    match is unknown.
     """
     _ensure_engines()
 
@@ -336,123 +381,128 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
         if not match:
             return None
 
-        tactical = TacticalEngine()
-        player_engine = PlayerMatchupEngine()
-        narrator = NarrativeEngine()
-
-        home_name = (match.get("home_team") or {}).get("name", "Home")
-        away_name = (match.get("away_team") or {}).get("name", "Away")
-        home_cc   = (match.get("home_team") or {}).get("country_code")
-        away_cc   = (match.get("away_team") or {}).get("country_code")
+        t1 = (match.get("home_team") or {}).get("name", "Team 1")
+        t2 = (match.get("away_team") or {}).get("name", "Team 2")
         group_name = (match.get("group") or {}).get("name")
+        kickoff = match.get("datetime")
+        status = (match.get("status") or "").lower()
+        is_post = status in {"completed", "ft", "finished"}
 
-        home_elo = _elo.get_rating(home_name)
-        away_elo = _elo.get_rating(away_name)
+        elo1 = _elo.get_rating(t1)
+        elo2 = _elo.get_rating(t2)
 
-        # ELO with 2026 host/proximity bonuses — kept for rating display + narrator.
-        elo_result = _elo.get_win_probability_with_context(
-            home_elo, away_elo,
-            home_country=home_cc, away_country=away_cc, host_country="USA",
-        )
-
-        # Dixon-Coles W/D/L (group situation + player xG + user notes folded in).
+        # Dixon-Coles prediction (group situation + player xG + user notes).
         home_notes, away_notes = _load_user_notes(conn, match_id)
         dc = DixonColesEngine()
         pred = dc.predict_from_db(
-            home_name, away_name,
-            home_elo=home_elo, away_elo=away_elo,
-            group_name=group_name,
-            home_notes=home_notes, away_notes=away_notes,
+            t1, t2, home_elo=elo1, away_elo=elo2,
+            group_name=group_name, home_notes=home_notes, away_notes=away_notes,
             top_n=10,
         )
         wdl = pred["win_draw_loss"]
+        eg = pred["expected_goals"]
+        mtx = pred["matrix"]
 
-        home_recent = _recent_team_stats(conn, home_name)
-        away_recent = _recent_team_stats(conn, away_name)
-
-        home_prev = tactical.analyze_previous_match(home_name, _zone_proxy(home_recent))
-        away_prev = tactical.analyze_previous_match(away_name, _zone_proxy(away_recent))
-
-        poss_impact = tactical.calculate_possession_impact(
-            home_recent["possession_pct"], away_recent["possession_pct"],
-        )
-
-        key_players = _key_players_for(home_name, away_name)
-
+        # Upset probability via pattern matcher.
+        home_recent = _recent_team_stats(conn, t1)
+        away_recent = _recent_team_stats(conn, t2)
         xg_diff = round(home_recent["xg_total"] - away_recent["xg_total"], 2)
+        upset_pct = _pattern_matcher.calculate_upset_probability(
+            _pattern_matcher.find_similar_matches({
+                "xg_diff": xg_diff,
+                "elo_diff": elo1 - elo2,
+                "possession_diff": home_recent["possession_pct"] - away_recent["possession_pct"],
+                "shots_diff": home_recent["shots_total"] - away_recent["shots_total"],
+                "fatigue_diff": 0,
+                "elimination_pressure": 0,
+            }, top_n=3)
+        )
 
-        current_features = {
-            "xg_diff":              xg_diff,
-            "elo_diff":             home_elo - away_elo,
-            "possession_diff":      home_recent["possession_pct"] - away_recent["possession_pct"],
-            "shots_diff":           home_recent["shots_total"]    - away_recent["shots_total"],
-            "fatigue_diff":         0,
-            "elimination_pressure": 0,
+        # Team strength cards.
+        strengths = _team_strengths_from_db()
+        s1 = dc._resolve_strength(t1, strengths) or {"attack": 1.0, "defense": 1.0}
+        s2 = dc._resolve_strength(t2, strengths) or {"attack": 1.0, "defense": 1.0}
+        xf1, xa1 = _match_strength(conn, dc._resolve_team_name(t1))
+        xf2, xa2 = _match_strength(conn, dc._resolve_team_name(t2))
+
+        group_label = (group_name or "Knockout").upper()
+        md = _matchday(conn, group_name, kickoff)
+        time_str = kickoff[11:16] if kickoff and len(kickoff) >= 16 else ""
+        ctx_parts = [group_label]
+        if md:
+            ctx_parts.append(f"MATCHDAY {md}")
+        if is_post:
+            ctx_parts.append("FULL TIME")
+        elif time_str:
+            ctx_parts.append(f"{time_str} UTC")
+        ctx_line = " · ".join(ctx_parts)
+
+        b = {
+            "match":     match,
+            "team1":     t1,
+            "team2":     t2,
+            "code1":     _team_code(t1),
+            "code2":     _team_code(t2),
+            "ctx_line":  ctx_line,
+            "elo_diff":  round(elo1 - elo2),
+            "p1":        round(wdl["home_win"]),
+            "pdraw":     round(wdl["draw"]),
+            "p2":        round(wdl["away_win"]),
+            "eg1":       eg["home"],
+            "eg2":       eg["away"],
+            "rho":       dc.RHO,
+            "p00":       mtx.get((0, 0), 0.0),
+            "p10":       mtx.get((1, 0), 0.0),
+            "p11":       mtx.get((1, 1), 0.0),
+            "scorelines": pred["top_scorelines"][:5],
+            "situation": pred.get("situation"),
+            "upset_pct": upset_pct,
+            "model_used": "Dixon-Coles v1",
+            "strength1": {"elo": round(elo1), "xg_for": xf1, "xg_against": xa1,
+                          "attack": s1["attack"], "defense": s1["defense"]},
+            "strength2": {"elo": round(elo2), "xg_for": xf2, "xg_against": xa2,
+                          "attack": s2["attack"], "defense": s2["defense"]},
         }
-        similar_matches = _pattern_matcher.find_similar_matches(current_features, top_n=3)
-        upset_pct = _pattern_matcher.calculate_upset_probability(similar_matches)
+        b["narrative_pre"] = generate_pre_match_narrative(b)
 
-        motiv_home = player_engine.world_cup_motivation_bonus(
-            {"name": home_name},
-            {"must_win": False, "already_qualified": False, "elo_diff": home_elo - away_elo},
-        )
-        motiv_away = player_engine.world_cup_motivation_bonus(
-            {"name": away_name},
-            {"must_win": False, "already_qualified": False, "elo_diff": away_elo - home_elo},
-        )
+        if is_post:
+            hs = match.get("home_score") or 0
+            as_ = match.get("away_score") or 0
+            b["score"] = f"{hs} — {as_}"
+            b["actual_score_plain"] = f"{hs}-{as_}"
+            b["actual_total_goals"] = hs + as_
+            actual_winner = t1 if hs > as_ else (t2 if hs < as_ else "Draw")
+            b["actual_winner"] = actual_winner
 
-        reasons = narrator.generate_reasons(
-            elo_result, poss_impact, {"xg_diff": xg_diff},
-        )
-        key_lines = narrator.generate_key_matchups(key_players)
-        warnings_list = narrator.generate_warning(similar_matches, poss_impact, upset_pct)
-        warnings_list.append(f"⚠️ 역전 가능성 {upset_pct:.0f}%")
+            prow = conn.execute(
+                "SELECT home_win_pct, draw_pct, away_win_pct FROM predictions "
+                "WHERE match_id = ? ORDER BY created_at",
+                (match_id,),
+            ).fetchone()
+            if prow:
+                pp1, ppd, pp2 = prow["home_win_pct"], prow["draw_pct"], prow["away_win_pct"]
+            else:
+                pp1, ppd, pp2 = wdl["home_win"], wdl["draw"], wdl["away_win"]
+            b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
 
-        # Polymarket: best-effort, never block the page
-        poly_qual = poly_group = None
-        try:
-            poly_qual = polymarket.get_qualification_odds(home_name, round="16")
-        except Exception as e:
-            print(f"polymarket qual error: {e}")
-        try:
-            poly_group = polymarket.get_group_winner_odds(home_name)
-        except Exception as e:
-            print(f"polymarket group error: {e}")
+            predicted_winner = max(
+                [(pp1, t1), (ppd, "Draw"), (pp2, t2)], key=lambda x: x[0]
+            )[1]
+            b["predicted_winner"] = predicted_winner
+            b["prediction_correct"] = (predicted_winner == actual_winner)
 
-        return {
-            "match":         match,
-            "home_name":     home_name,
-            "away_name":     away_name,
-            # W/D/L now from Dixon-Coles (keep home_pct/away_pct for the template).
-            "home_pct":      round(wdl["home_win"]),
-            "draw_pct":      round(wdl["draw"]),
-            "away_pct":      round(wdl["away_win"]),
-            "home_win_pct":  round(wdl["home_win"]),
-            "away_win_pct":  round(wdl["away_win"]),
-            "expected_goals": pred["expected_goals"],
-            "scoreline_matrix": pred["top_scorelines"],   # top 10
-            "situation":     pred.get("situation"),
-            "model_used":    "Dixon-Coles v1",
-            "elo_diff":      round(home_elo - away_elo),
-            "home_elo":      round(home_elo),
-            "away_elo":      round(away_elo),
-            "home_prev":     home_prev,
-            "away_prev":     away_prev,
-            "poss_impact":   poss_impact,
-            "key_players":   key_players,
-            "key_lines":     key_lines,
-            "similar_matches": similar_matches,
-            "upset_pct":     upset_pct,
-            "motiv_home":    motiv_home,
-            "motiv_away":    motiv_away,
-            "reasons":       reasons,
-            "warnings":      warnings_list,
-            "xg_diff":       xg_diff,
-            "home_recent":   home_recent,
-            "away_recent":   away_recent,
-            "poly_qual_pct": round(poly_qual * 100) if poly_qual is not None else None,
-            "poly_group_pct": round(poly_group * 100) if poly_group is not None else None,
-        }
+            if prow:
+                a1 = 1.0 if actual_winner == t1 else 0.0
+                ad = 1.0 if actual_winner == "Draw" else 0.0
+                a2 = 1.0 if actual_winner == t2 else 0.0
+                b["brier"] = round(
+                    (pp1 / 100 - a1) ** 2 + (ppd / 100 - ad) ** 2 + (pp2 / 100 - a2) ** 2, 2
+                )
+            else:
+                b["brier"] = None
+            b["narrative_post"] = generate_post_match_review(b)
+
+        return b
     finally:
         if own_conn:
             conn.close()
@@ -499,57 +549,95 @@ def _load_match_from_db_or_api(match_id: int) -> Optional[dict]:
 @app.route("/")
 def index():
     _ensure_engines()
-    try:
-        matches = data_pipeline.get_today_matches()
-    except Exception as e:
-        print(f"index: today fetch error: {e}")
-        matches = []
+    today = date.today()
+    today_str = today.isoformat()
+    start_str = (today - timedelta(days=6)).isoformat()
 
+    conn = database.get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT m.id AS id, ht.name AS t1, at.name AS t2,
+                   m.kickoff_utc AS k, m.status AS status,
+                   m.home_score AS hs, m.away_score AS as_, m.group_name AS grp
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.season = 2026
+              AND substr(m.kickoff_utc, 1, 10) >= ?
+              AND substr(m.kickoff_utc, 1, 10) <= ?
+            ORDER BY m.kickoff_utc
+        """, (start_str, today_str)).fetchall()
+    finally:
+        conn.close()
+
+    # Group fixtures by date for the sidebar; collect today's playable matches.
+    by_date: dict = {}
+    today_rows = []
+    for r in rows:
+        k = r["k"] or ""
+        d = k[:10]
+        st = (r["status"] or "").lower()
+        is_live = st in {"live", "in_progress"}
+        is_done = st in {"completed", "ft", "finished"}
+        time_str = k[11:16] if len(k) >= 16 else ""
+        if is_done:
+            meta, state = f"FT {r['hs']}-{r['as_']}", "done"
+        elif is_live:
+            meta, state = "LIVE", "live"
+        else:
+            meta, state = (f"{time_str} UTC" if time_str else "TBD"), ""
+        by_date.setdefault(d, []).append({
+            "id": r["id"], "teams": f"{r['t1']} vs {r['t2']}",
+            "meta": meta, "state": state,
+        })
+        if d == today_str and not is_done:
+            today_rows.append(r)
+
+    def day_label(d):
+        if d == today_str:
+            return "TODAY"
+        try:
+            return date.fromisoformat(d).strftime("%b %d").upper()
+        except ValueError:
+            return d
+
+    sidebar_days = [{"label": day_label(d), "fixtures": by_date[d]}
+                    for d in sorted(by_date.keys(), reverse=True)]
+
+    # Today's main cards with Dixon-Coles probabilities.
     dc = DixonColesEngine()
-    enriched = []
-    for m in matches:
-        home = (m.get("home_team") or {}).get("name", "?")
-        away = (m.get("away_team") or {}).get("name", "?")
-        group = (m.get("group") or {}).get("name", "")
+    today_cards = []
+    for r in today_rows:
+        t1, t2, grp = r["t1"], r["t2"], r["grp"]
+        st = (r["status"] or "").lower()
+        k = r["k"] or ""
         try:
             pred = dc.predict_from_db(
-                home, away,
-                home_elo=_elo.get_rating(home),
-                away_elo=_elo.get_rating(away),
-                group_name=group or None,
+                t1, t2,
+                home_elo=_elo.get_rating(t1), away_elo=_elo.get_rating(t2),
+                group_name=grp or None,
             )
             wdl = pred["win_draw_loss"]
-            home_pct = round(wdl["home_win"])
-            draw_pct = round(wdl["draw"])
-            away_pct = round(wdl["away_win"])
-            home_sit = (pred.get("situation") or {}).get("home") or {}
-            note = home_sit.get("note")
-            expected_goals = pred.get("expected_goals")
+            eg = pred["expected_goals"]
+            note = ((pred.get("situation") or {}).get("home") or {}).get("note")
+            today_cards.append({
+                "id": r["id"], "team1": t1, "team2": t2,
+                "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]), "p2": round(wdl["away_win"]),
+                "xg1": eg["home"], "xg2": eg["away"], "note": note,
+                "group": (grp or "").upper(),
+                "time": (k[11:16] if len(k) >= 16 else ""),
+                "is_live": st in {"live", "in_progress"},
+            })
         except Exception as e:
-            print(f"index: predict error for {home} vs {away}: {e}")
-            probs = _elo.get_win_probability(_elo.get_rating(home), _elo.get_rating(away))
-            home_pct = round(probs["home"] * 100)
-            draw_pct = round(probs["draw"] * 100)
-            away_pct = round(probs["away"] * 100)
-            note = None
-            expected_goals = None
-        enriched.append({
-            "id":         m.get("id"),
-            "home_name":  home,
-            "away_name":  away,
-            "home_pct":   home_pct,
-            "draw_pct":   draw_pct,
-            "away_pct":   away_pct,
-            "note":       note,
-            "expected_goals": expected_goals,
-            "status":     m.get("status"),
-            "kickoff":    m.get("datetime"),
-            "home_score": m.get("home_score"),
-            "away_score": m.get("away_score"),
-            "group":      group,
-        })
+            print(f"index: predict error for {t1} vs {t2}: {e}")
 
-    return render_template("index.html", matches=enriched, today=date.today().isoformat())
+    return render_template(
+        "index.html",
+        sidebar_days=sidebar_days,
+        today_cards=today_cards,
+        today_label=today.strftime("%A, %B %d"),
+        stage_label="GROUP STAGE",
+    )
 
 
 @app.route("/api/brier")

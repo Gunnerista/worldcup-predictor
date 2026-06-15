@@ -1,106 +1,68 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>FIFA World Cup 2026 — {{ today }}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
+{% extends "base.html" %}
 
-<header class="hero">
-    <div class="hero-inner">
-        <div class="date-line">{{ today }} &middot; GROUP STAGE</div>
-        <h1>FIFA World Cup 2026</h1>
-        <div class="sub">실시간 예측 컨설팅 리포트</div>
-    </div>
-</header>
+{% block body %}
+<div class="app-shell">
 
-<main class="container">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="logo">MATCHIQ</div>
+            <div class="tag">FIFA WC 2026</div>
+        </div>
 
-    <div class="section-head">
-        <h2>오늘 경기</h2>
-        <span class="count">{{ matches|length }}경기</span>
-    </div>
-
-    {% if matches %}
-    <ul class="match-list">
-        {% for m in matches %}
-        <li class="match-card{% if m.status in ('live','in_progress') %} live{% endif %}{% if m.status == 'completed' %} done{% endif %}">
-            <a href="/match/{{ m.id }}">
-                <div class="match-meta">
-                    {% if m.group %}<span class="group">{{ m.group }}</span>{% endif %}
-                    <span class="kickoff">{{ m.kickoff[11:16] if m.kickoff else '' }} UTC</span>
-                    {% if m.status in ('live','in_progress') %}
-                        <span class="badge live-badge">LIVE</span>
-                    {% elif m.status == 'completed' %}
-                        <span class="badge complete-badge">FT</span>
-                    {% else %}
-                        <span class="badge scheduled-badge">예정</span>
-                    {% endif %}
-                </div>
-
-                <div class="match-row">
-                    <div class="team home">
-                        <span class="team-name">{{ m.home_name }}</span>
-                        {% if m.status == 'completed' %}
-                            <span class="team-score">{{ m.home_score }}</span>
-                        {% endif %}
-                    </div>
-                    <div class="vs">vs</div>
-                    <div class="team away">
-                        {% if m.status == 'completed' %}
-                            <span class="team-score">{{ m.away_score }}</span>
-                        {% endif %}
-                        <span class="team-name">{{ m.away_name }}</span>
-                    </div>
-                </div>
-
-                <div class="probs-mini">
-                    <span class="prob home">
-                        <b>{{ m.home_pct }}%</b>
-                        <small>승</small>
-                    </span>
-                    <span class="prob draw">
-                        <b>{{ m.draw_pct }}%</b>
-                        <small>무</small>
-                    </span>
-                    <span class="prob away">
-                        <b>{{ m.away_pct }}%</b>
-                        <small>승</small>
-                    </span>
-                </div>
-
-                {% if m.expected_goals %}
-                <div class="xg-mini">
-                    예상 득점(xG) {{ '%.1f'|format(m.expected_goals.home) }} : {{ '%.1f'|format(m.expected_goals.away) }}
-                </div>
-                {% endif %}
-
-                {% if m.note %}
-                <div class="situation-note">
-                    {% if '탈락' in m.note %}⚫{% elif '통과' in m.note or '진출 확정' in m.note %}🟢{% elif '이겨야' in m.note %}🔴{% elif '비기면' in m.note %}🟡{% else %}⚪{% endif %}
-                    {{ m.note }}
-                </div>
-                {% endif %}
-
-                <div class="cta">상세 리포트 보기 →</div>
+        {% for day in sidebar_days %}
+        <div class="day-group">
+            <div class="day-label">{{ day.label }}</div>
+            {% for f in day.fixtures %}
+            <a class="fixture {{ f.state }}" href="/match/{{ f.id }}">
+                <div class="teams">{{ f.teams }}</div>
+                <div class="meta">{{ f.meta }}</div>
             </a>
-        </li>
+            {% endfor %}
+        </div>
         {% endfor %}
-    </ul>
-    {% else %}
-    <div class="empty">
-        <p>오늘 예정된 경기가 없습니다.</p>
-    </div>
-    {% endif %}
+    </aside>
 
-</main>
+    <main class="main">
+        <div class="main-head">
+            <div class="date">{{ today_label }}</div>
+            <div class="stage">{{ stage_label }}</div>
+        </div>
 
-<footer class="foot">
-    <p>worldcup-predictor &middot; 모든 확률은 ELO + xG + 패턴 매칭 엔진 계산</p>
-</footer>
+        {% if today_cards %}
+        <div class="cards">
+            {% for m in today_cards %}
+            <a class="card match-card" href="/match/{{ m.id }}">
+                <div class="mc-meta">
+                    <span class="grp">{{ m.group }}</span>
+                    {% if m.is_live %}<span class="badge live">LIVE</span>
+                    {% else %}<span class="badge">{{ m.time }} UTC</span>{% endif %}
+                </div>
 
-</body>
-</html>
+                <div class="mc-teams">
+                    <span class="t t1">{{ m.team1 }}</span>
+                    <span class="x">vs</span>
+                    <span class="t t2">{{ m.team2 }}</span>
+                </div>
+
+                <div class="mc-probs">
+                    <div class="seg s1"><span class="v">{{ m.p1 }}%</span><span class="k">{{ m.team1 }}</span></div>
+                    <div class="seg"><span class="v">{{ m.pdraw }}%</span><span class="k">Draw</span></div>
+                    <div class="seg s2"><span class="v">{{ m.p2 }}%</span><span class="k">{{ m.team2 }}</span></div>
+                </div>
+
+                {% if m.xg1 is not none %}
+                <div class="mc-xg">Total xG {{ '%.2f'|format(m.xg1 + m.xg2) }} &middot; {{ '%.2f'|format(m.xg1) }} : {{ '%.2f'|format(m.xg2) }}</div>
+                {% endif %}
+                {% if m.note %}<div class="mc-note">{{ m.note }}</div>{% endif %}
+
+                <div class="mc-cta">View Analysis →</div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty">No matches scheduled today.</div>
+        {% endif %}
+    </main>
+
+</div>
+{% endblock %}

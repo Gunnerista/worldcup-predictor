@@ -1,232 +1,151 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ bundle.home_name }} vs {{ bundle.away_name }}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
-</head>
-<body data-match-id="{{ match_id }}" data-phase="{{ phase }}">
+{% extends "base.html" %}
 
-<header class="match-hero">
-    <div class="hero-inner">
-        <a href="/" class="back-link">← 오늘 경기 목록</a>
-        <h1>{{ bundle.home_name }} <span class="vs-light">vs</span> {{ bundle.away_name }}</h1>
-        <div class="kickoff-line">
-            {% if bundle.match.datetime %}{{ bundle.match.datetime[:10] }} {{ bundle.match.datetime[11:16] }} UTC{% endif %}
-            {% if bundle.match.stage %} &middot; {{ bundle.match.stage.name }}{% endif %}
-            {% if phase == 'live' %} &middot; <span class="badge live-badge">LIVE</span>{% endif %}
-            {% if phase == 'post' %} &middot; <span class="badge complete-badge">FT {{ bundle.match.home_score }}-{{ bundle.match.away_score }}</span>{% endif %}
+{% block body %}
+<div class="match-page" data-match-id="{{ match_id }}" data-phase="{{ phase }}">
+
+    <a class="back" href="/">← All fixtures</a>
+
+    <div class="m-head">
+        <div class="ctx">{{ bundle.ctx_line }}</div>
+        {% if phase == 'post' %}
+        <div class="m-title">
+            <span class="t1">{{ bundle.team1 }}</span>
+            <span class="score">{{ bundle.score }}</span>
+            <span class="t2">{{ bundle.team2 }}</span>
+        </div>
+        {% else %}
+        <div class="m-title">
+            <span class="t1">{{ bundle.team1 }}</span>
+            <span class="vs">vs</span>
+            <span class="t2">{{ bundle.team2 }}</span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- probability bar -->
+    <div class="prob-bar">
+        <div class="pb-row r1">
+            <span class="name">{{ bundle.team1 }}</span>
+            <span class="pb-track"><span class="pb-fill f1" style="width: {{ bundle.p1 }}%"></span></span>
+            <span class="pct">{{ bundle.p1 }}%</span>
+        </div>
+        <div class="pb-row rd">
+            <span class="name">Draw</span>
+            <span class="pb-track"><span class="pb-fill fd" style="width: {{ bundle.pdraw }}%"></span></span>
+            <span class="pct">{{ bundle.pdraw }}%</span>
+        </div>
+        <div class="pb-row r2">
+            <span class="name">{{ bundle.team2 }}</span>
+            <span class="pb-track"><span class="pb-fill f2" style="width: {{ bundle.p2 }}%"></span></span>
+            <span class="pct">{{ bundle.p2 }}%</span>
         </div>
     </div>
-</header>
 
-<main class="container">
+    {% if phase == 'post' %}
+    <!-- ================= POST-MATCH ================= -->
 
-    <!-- 1. 메인 확률 -->
-    <section class="probs-section">
-        <div class="prob-col home">
-            <div class="prob-team">{{ bundle.home_name }}</div>
-            <div class="prob-val">{{ bundle.home_pct }}<small>%</small></div>
-            <div class="prob-sub">승</div>
+    <section class="section">
+        <h2>Prediction vs Result</h2>
+        <div class="pvr">
+            <div class="col-h">Pre-Match Prediction</div>
+            <div class="arrow"></div>
+            <div class="col-h">Actual Result</div>
+
+            <div class="v1">{{ bundle.team1 }} <b>{{ bundle.pred.p1 }}%</b></div>
+            <div class="arrow">→</div>
+            <div>{% if bundle.actual_winner == bundle.team1 %}<b class="c-team1">{{ bundle.team1 }} WIN</b>{% else %}<span class="muted">—</span>{% endif %}</div>
+
+            <div class="v1">Draw <b>{{ bundle.pred.pdraw }}%</b></div>
+            <div class="arrow">→</div>
+            <div>{% if bundle.actual_winner == 'Draw' %}<b>DRAW</b>{% else %}<span class="muted">—</span>{% endif %}</div>
+
+            <div class="v1">{{ bundle.team2 }} <b>{{ bundle.pred.p2 }}%</b></div>
+            <div class="arrow">→</div>
+            <div>{% if bundle.actual_winner == bundle.team2 %}<b class="c-team2">{{ bundle.team2 }} WIN</b>{% else %}<span class="muted">—</span>{% endif %}</div>
         </div>
-        <div class="prob-divider"></div>
-        <div class="prob-col draw">
-            <div class="prob-team">무승부</div>
-            <div class="prob-val">{{ bundle.draw_pct }}<small>%</small></div>
-            <div class="prob-sub">Draw</div>
-        </div>
-        <div class="prob-divider"></div>
-        <div class="prob-col away">
-            <div class="prob-team">{{ bundle.away_name }}</div>
-            <div class="prob-val">{{ bundle.away_pct }}<small>%</small></div>
-            <div class="prob-sub">승</div>
+        <div class="verdict">
+            Predicted: <b>{{ bundle.predicted_winner|upper }}</b>
+            {% if bundle.prediction_correct %}<span class="ok">✓ CORRECT</span>{% else %}<span class="no">✗ MISS</span>{% endif %}
+            &nbsp;&middot;&nbsp;
+            <span class="brier">Brier Score: {% if bundle.brier is not none %}{{ '%.2f'|format(bundle.brier) }}{% else %}pending{% endif %}</span>
         </div>
     </section>
 
-    <!-- 1b. Dixon-Coles 스코어 예측 -->
-    <section class="card full dc-detail">
-        <h2>스코어 예측 <span class="model-tag">{{ bundle.model_used }}</span></h2>
+    <section class="section">
+        <h2>Post-Match Review</h2>
+        <p class="narrative">{{ bundle.narrative_post }}</p>
+    </section>
 
-        {% if bundle.expected_goals %}
-        <p class="lead">예상 득점(xG) —
-            <b>{{ bundle.home_name }} {{ '%.2f'|format(bundle.expected_goals.home) }}</b>
-            vs
-            <b>{{ bundle.away_name }} {{ '%.2f'|format(bundle.expected_goals.away) }}</b>
-        </p>
-        {% endif %}
+    {% else %}
+    <!-- ================= PRE-MATCH ================= -->
 
-        {% if bundle.scoreline_matrix %}
-        <div class="scorelines">
-            {% for s in bundle.scoreline_matrix[:5] %}
-            <span class="scoreline"><b>{{ s.scoreline }}</b> {{ s.probability_pct }}%</span>
+    <section class="section">
+        <h2>Pre-Match Analysis</h2>
+        <p class="narrative">{{ bundle.narrative_pre }}</p>
+        <div class="mathblock">λ_{{ bundle.code1 }} = {{ '%.3f'|format(bundle.eg1) }}   μ_{{ bundle.code2 }} = {{ '%.3f'|format(bundle.eg2) }}   ρ = {{ '%.4f'|format(bundle.rho) }} (MLE, n=128)
+P(0-0) = {{ '%.4f'|format(bundle.p00) }}   P(1-0) = {{ '%.4f'|format(bundle.p10) }}   P(1-1) = {{ '%.4f'|format(bundle.p11) }}</div>
+    </section>
+
+    {% endif %}
+
+    <!-- ================= SHARED: scorelines + strength ================= -->
+
+    {% if bundle.scorelines %}
+    <section class="section">
+        <h2>Scoreline Probability</h2>
+        <div class="scoreline-list">
+            {% for s in bundle.scorelines %}
+            <div class="sl-row">
+                <span class="sl">{{ s.scoreline }}</span>
+                <span class="sl-track"><span class="sl-fill" style="width: {{ (s.probability_pct / bundle.scorelines[0].probability_pct * 100)|round|int }}%"></span></span>
+                <span class="sl-pct">{{ s.probability_pct }}%</span>
+            </div>
             {% endfor %}
-        </div>
-        {% endif %}
-
-        {% if bundle.situation %}
-        <div class="situations">
-            {% if bundle.situation.home %}
-            <div class="sit-row"><span class="t">{{ bundle.home_name }}</span> <span class="note">{{ bundle.situation.home.note }}</span></div>
-            {% endif %}
-            {% if bundle.situation.away %}
-            <div class="sit-row"><span class="t">{{ bundle.away_name }}</span> <span class="note">{{ bundle.situation.away.note }}</span></div>
-            {% endif %}
-        </div>
-        {% endif %}
-
-        <div class="brier-line">모델 캘리브레이션 (Brier Score): <span id="brierScore">…</span></div>
-    </section>
-
-    <div class="grid">
-
-        <!-- 2. 이전 경기 복기 -->
-        <section class="card">
-            <h2>이전 경기 복기</h2>
-            <div class="recap-line">
-                <strong>{{ bundle.home_name }}</strong> — {{ bundle.home_prev.possession_pattern }}, {{ bundle.home_prev.weakest_zone_kr }} 측면 위협 비중 <b class="warn">{{ bundle.home_prev.vulnerability_score }}%</b>
-            </div>
-            <div class="recap-line">
-                <strong>{{ bundle.away_name }}</strong> — {{ bundle.away_prev.possession_pattern }}, {{ bundle.away_prev.weakest_zone_kr }} 측면 위협 비중 <b class="warn">{{ bundle.away_prev.vulnerability_score }}%</b>
-            </div>
-        </section>
-
-        <!-- 3. 이번 경기 핵심 -->
-        <section class="card">
-            <h2>이번 경기 핵심</h2>
-            <p class="lead">{{ bundle.poss_impact.note }}</p>
-            <div class="meta">ELO 격차 {{ bundle.elo_diff }} ({{ bundle.home_elo }} vs {{ bundle.away_elo }})</div>
-        </section>
-
-        <!-- 4. 모델 근거 3가지 -->
-        <section class="card full">
-            <h2>모델 근거 3가지</h2>
-            <ol class="reasons">
-                {% for r in bundle.reasons %}
-                <li>{{ r }}</li>
-                {% endfor %}
-            </ol>
-        </section>
-
-        <!-- 5. 주목할 선수 TOP 3 -->
-        <section class="card full">
-            <h2>주목할 선수 TOP 3</h2>
-            <ol class="players">
-                {% for line in bundle.key_lines %}
-                <li>{{ line }}</li>
-                {% endfor %}
-            </ol>
-        </section>
-
-        <!-- 6. 유사 과거 경기 -->
-        <section class="card full">
-            <h2>유사 과거 경기</h2>
-            <ol class="similar">
-                {% for s in bundle.similar_matches %}
-                <li>
-                    <div class="row">
-                        <span class="sim-label">{{ s.label }}</span>
-                        <span class="sim-pct">{{ s.similarity_pct|round|int }}% 유사</span>
-                    </div>
-                    <p class="lesson">{{ s.lesson }}</p>
-                </li>
-                {% endfor %}
-            </ol>
-        </section>
-
-        <!-- 7. 경고 시그널 -->
-        <section class="card warnings full">
-            <h2>경고 시그널</h2>
-            <ul>
-                {% for w in bundle.warnings %}
-                <li>{{ w }}</li>
-                {% endfor %}
-            </ul>
-        </section>
-
-        <!-- 8. 월드컵 특수 요소 -->
-        <section class="card full">
-            <h2>월드컵 특수 요소</h2>
-            <div class="motiv">
-                <div class="motiv-row">
-                    <span class="t">{{ bundle.home_name }}</span>
-                    <span class="note">{{ bundle.motiv_home.explanation }}</span>
-                    <span class="bonus">{{ '%+.1f' % (bundle.motiv_home.bonus * 100) }}%p</span>
-                </div>
-                <div class="motiv-row">
-                    <span class="t">{{ bundle.away_name }}</span>
-                    <span class="note">{{ bundle.motiv_away.explanation }}</span>
-                    <span class="bonus">{{ '%+.1f' % (bundle.motiv_away.bonus * 100) }}%p</span>
-                </div>
-            </div>
-        </section>
-
-        <!-- 9. Polymarket -->
-        <section class="card full">
-            <h2>Polymarket 시장 배당</h2>
-            <div class="poly-grid">
-                <div class="poly-cell">
-                    <div class="poly-label">{{ bundle.home_name }} 16강 진출</div>
-                    <div class="poly-val">{% if bundle.poly_qual_pct is not none %}{{ bundle.poly_qual_pct }}%{% else %}—{% endif %}</div>
-                </div>
-                <div class="poly-cell">
-                    <div class="poly-label">{{ bundle.home_name }} 조 우승</div>
-                    <div class="poly-val">{% if bundle.poly_group_pct is not none %}{{ bundle.poly_group_pct }}%{% else %}—{% endif %}</div>
-                </div>
-            </div>
-        </section>
-
-        <!-- 10. 내 메모 -->
-        <section class="card full notes">
-            <h2>내 메모</h2>
-            <form method="post" action="/notes/{{ match_id }}">
-                <label>감독 전술 변화
-                    <textarea name="tactics" rows="2" placeholder="예: 4-2-3-1 변경 가능성, 풀백 공격가담..."></textarea>
-                </label>
-                <label>선수 컨디션
-                    <textarea name="player_condition" rows="2" placeholder="예: 손흥민 햄스트링 회복 후 첫 풀타임..."></textarea>
-                </label>
-                <label>심리적 요소
-                    <textarea name="psychology" rows="2" placeholder="예: 직전 경기 패배 분위기, 홈팬 환경..."></textarea>
-                </label>
-                <label>기타
-                    <textarea name="other" rows="2" placeholder="예: 심판 성향, 날씨..."></textarea>
-                </label>
-                <button type="submit">메모 저장</button>
-            </form>
-        </section>
-
-    </div>
-
-    <!-- LIVE-only widgets (rendered for the live phase) -->
-    {% if phase == 'live' %}
-    <section class="card full live-widgets">
-        <h2>실시간 차트</h2>
-        <div class="chart-row">
-            <div class="chart-wrap"><canvas id="momentumChart"></canvas></div>
-            <div class="chart-wrap"><canvas id="possessionChart"></canvas></div>
         </div>
     </section>
     {% endif %}
 
-</main>
+    <section class="section">
+        <h2>Team Strength</h2>
+        <div class="strength-grid">
+            <div class="sg-head h-team1">{{ bundle.team1 }}</div>
+            <div class="sg-head h-k"></div>
+            <div class="sg-head h-team2">{{ bundle.team2 }}</div>
 
-<footer class="foot">
-    <p>모든 수치는 ELO + Tactical + Player + Pattern + Narrative 엔진 계산 결과</p>
-</footer>
+            <div class="sg-row v1">{{ bundle.strength1.elo }}</div>
+            <div class="sg-row k">ELO</div>
+            <div class="sg-row v2">{{ bundle.strength2.elo }}</div>
 
-<script src="{{ url_for('static', filename='charts.js') }}"></script>
+            <div class="sg-row v1">{% if bundle.strength1.xg_for is not none %}{{ '%.2f'|format(bundle.strength1.xg_for) }}{% else %}—{% endif %}</div>
+            <div class="sg-row k">xG For</div>
+            <div class="sg-row v2">{% if bundle.strength2.xg_for is not none %}{{ '%.2f'|format(bundle.strength2.xg_for) }}{% else %}—{% endif %}</div>
+
+            <div class="sg-row v1">{% if bundle.strength1.xg_against is not none %}{{ '%.2f'|format(bundle.strength1.xg_against) }}{% else %}—{% endif %}</div>
+            <div class="sg-row k">xG Against</div>
+            <div class="sg-row v2">{% if bundle.strength2.xg_against is not none %}{{ '%.2f'|format(bundle.strength2.xg_against) }}{% else %}—{% endif %}</div>
+
+            <div class="sg-row v1">{{ '%.2f'|format(bundle.strength1.attack) }}</div>
+            <div class="sg-row k">Attack Str</div>
+            <div class="sg-row v2">{{ '%.2f'|format(bundle.strength2.attack) }}</div>
+
+            <div class="sg-row v1">{{ '%.2f'|format(bundle.strength1.defense) }}</div>
+            <div class="sg-row k">Defense Str</div>
+            <div class="sg-row v2">{{ '%.2f'|format(bundle.strength2.defense) }}</div>
+        </div>
+        <div class="model-foot">
+            <span>Upset Probability: {{ bundle.upset_pct|round|int }}%</span>
+            <span>{{ bundle.model_used }}</span>
+        </div>
+    </section>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
 <script>
-// Model calibration: pull the live Brier score from /api/brier.
 fetch('/api/brier').then(function (r) { return r.json(); }).then(function (d) {
-    var el = document.getElementById('brierScore');
-    if (!el) return;
-    el.textContent = (d && d.n_matches > 0)
-        ? (d.brier_score.toFixed(3) + ' (' + d.n_matches + '경기 기준, 낮을수록 정확)')
-        : '아직 채점된 경기 없음';
+    var el = document.getElementById('brierGlobal');
+    if (el && d) el.textContent = d.n_matches > 0 ? d.brier_score.toFixed(3) : 'n/a';
 }).catch(function () {});
 </script>
-</body>
-</html>
+{% endblock %}
