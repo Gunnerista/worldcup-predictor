@@ -80,6 +80,18 @@
         {% endif %}
     </section>
 
+    {% if bundle.model_edge %}
+    <section class="section model-edge">
+        <h2>Pre-Match Signal</h2>
+        <div class="me-bet">{{ bundle.model_edge.suggested_bet }}</div>
+        <div class="me-stats">
+            <span>Draw edge {{ bundle.model_edge.draw_edge }}pp</span>
+            <span>Total xG {{ bundle.model_edge.total_xg }}</span>
+            <span>Under 2.5 lean: {{ 'yes' if bundle.model_edge.under_lean else 'no' }}</span>
+        </div>
+    </section>
+    {% endif %}
+
     <section class="section">
         <h2>Post-Match Review</h2>
         <div class="narrative">

@@ -506,7 +506,17 @@ def _season_record():
         hp, dp, ap = float(r["hp"]), float(r["dp"]), float(r["ap"])
         hs, as_ = r["hs"], r["as_"]
         actual = "home" if hs > as_ else ("away" if hs < as_ else "draw")
-        pred = max([(hp, "home"), (dp, "draw"), (ap, "away")], key=lambda x: x[0])[1]
+        # Predicted winner follows the MODEL EDGE rule (probabilities only — the
+        # predictions table has no xG, so the UNDER-2.5 branch is omitted; it
+        # never picks a winner anyway, so results match the match-page logic).
+        if dp - 26 > 5:
+            pred = "draw"
+        elif hp > 55:
+            pred = "home"
+        elif ap > 55:
+            pred = "away"
+        else:
+            pred = max([(hp, "home"), (dp, "draw"), (ap, "away")], key=lambda x: x[0])[1]
         total += 1
         if pred == actual:
             correct += 1
@@ -660,9 +670,20 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                 has_saved = False
             b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
 
-            predicted_winner = max(
-                [(pp1, t1), (ppd, "Draw"), (pp2, t2)], key=lambda x: x[0]
-            )[1]
+            # Predicted winner follows the MODEL EDGE signal (parsed from its
+            # suggested_bet string), falling back to highest probability when the
+            # edge is non-directional ("No clear edge" / "UNDER 2.5").
+            sb = b["model_edge"]["suggested_bet"]
+            if sb.startswith("DRAW"):
+                predicted_winner = "Draw"
+            elif sb.startswith(f"{t1} WIN"):
+                predicted_winner = t1
+            elif sb.startswith(f"{t2} WIN"):
+                predicted_winner = t2
+            else:
+                predicted_winner = max(
+                    [(pp1, t1), (ppd, "Draw"), (pp2, t2)], key=lambda x: x[0]
+                )[1]
             b["predicted_winner"] = predicted_winner
             b["prediction_correct"] = (predicted_winner == actual_winner)
 
