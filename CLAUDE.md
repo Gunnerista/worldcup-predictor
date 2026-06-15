@@ -1,28 +1,28 @@
-# CLAUDE.md — worldcup-predictor
+# CLAUDE.md — MATCHIQ (worldcup-predictor)
 
 이 파일은 프로젝트 단일 진실 공급원(SSoT). 컨텍스트가 꽉 차서 새 세션을 열어도, 이 문서만 읽으면 그대로 이어갈 수 있어야 함.
 
 > **새 세션 필독:** §11 함정(Gotchas) 먼저 읽어. 같은 함정에 두 번 빠지지 마.
+> **최종 갱신:** 2026-06-15 (MATCHIQ 리브랜드 + DixonColes 웹 연결 + 예측 추적 완료 시점)
 
 ---
 
 ## 1. 프로젝트 정체성
 
-- **이름:** worldcup-predictor
-- **목표:** FIFA World Cup 2026 경기 승/무/패 확률을 수학적으로 계산해서 컨설팅 리포트 형태로 보여주는 웹사이트.
+- **이름:** MATCHIQ (레포명은 여전히 `worldcup-predictor`)
+- **목표:** FIFA World Cup 2026 경기 승/무/패 확률을 수학적으로 계산해서 보여주는 예측 시스템.
 - **용도:** Polymarket / Kalshi에서 사용자가 **직접** 베팅 결정을 내리는 의사결정 보조 도구.
 - **자동 베팅 절대 금지.** 코드 어디에도 거래소 주문 API 호출 로직 넣지 말 것.
-- **컨셉:** "축구도사" — 단순 확률 계산기가 아니라 **왜 이 확률인지 근거까지 설명**하는 분석가 수준 리포트.
+- **브랜드/UI:** "MATCHIQ" — 통계 기반 분석 콘솔. **UI 전부 영어, Home/Away 레이블 없이 팀명으로 직접 표시.** 국기 이모지 + 팀 컬러.
 
 ---
 
 ## 2. 운영자 컨텍스트
 
 - 운영자는 **비코더**. 코드 라인 단위 검수 못 함.
-- 모든 변경은:
-  - 사용자 눈에 보이는 결과 위주로 한국어 설명.
-  - 외부 API 동작은 검증 후 단언. "아마 될 거예요" 금지.
-  - 실거래/실머니 영향 코드는 무조건 테스트.
+- **운영자와의 대화는 한국어**, 단 **웹사이트 UI 텍스트는 전부 영어** (사용자 요구). 코드/커밋/주석/로그도 영어.
+- 외부 API 동작은 검증 후 단언. "아마 될 거예요" 금지.
+- 실거래/실머니 영향 코드는 무조건 테스트.
 - 글로벌 규칙은 `~/.claude/CLAUDE.md` 참고. 충돌 시 본 파일 우선.
 
 ---
@@ -30,9 +30,10 @@
 ## 3. 현재 상태 (Live)
 
 - **GitHub:** `https://github.com/Gunnerista/worldcup-predictor.git` (branch: `main`)
-- **배포:** Railway (web 서비스 + PostgreSQL 서비스)
-- **로컬 DB:** `worldcup.db` (SQLite) — 128경기 풀 백필 완료, gitignored
-- **Railway DB:** PostgreSQL — 스키마 자동 생성됨, 데이터는 `migrate.py`로 옮겨야 채워짐
+- **라이브:** `https://worldcup-predictor-production-c55a.up.railway.app` (Railway, GitHub push 시 자동 배포)
+- **로컬 DB:** `worldcup.db` (SQLite) — 2018+2022 128경기 + **2026 104경기** 포함, gitignored
+- **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
+- **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, EST 시간.
 
 ---
 
@@ -42,13 +43,15 @@
 |---|---|
 | 언어 | Python 3.14 (Windows 11 로컬, Railway는 Python 3.13) |
 | 웹 프레임워크 | Flask 3.x |
-| WSGI | gunicorn (Railway), `python app.py` (로컬) |
-| 실시간 푸시 | Server-Sent Events (SSE) — WebSocket 아님 |
+| WSGI | gunicorn **`--workers 1`** (Railway), `python app.py` (로컬) |
+| 실시간 | 백그라운드 데몬 스레드(sync) + SSE(`/stream`, LIVE 스켈레톤) |
 | DB | **SQLite (로컬) + PostgreSQL (Railway)** — `database.py`가 듀얼 백엔드 |
-| 프런트 | HTML / CSS / Vanilla JS — 별도 프레임워크 없음 |
-| 차트 | Chart.js CDN (LIVE 페이지만) |
-| 디자인 | ESPN/Opta 스타일, 다크 `#0d1117`, 형광 초록 `#00ff88` + 파랑 `#58a6ff` |
-| 모바일 | 필수 (`@media max-width: 720px`) |
+| 프런트 | Jinja2 템플릿 + Vanilla JS — `base.html` 상속 구조 |
+| 폰트 | **IBM Plex Mono** (숫자/레이블), system-ui (내러티브 본문) |
+| 이모지/국기 | **Twemoji** (CDN) — Windows에서 국기 이모지가 "SE" 같은 글자로 깨지는 것 방지 |
+| 시간대 | **EST 고정 UTC-5** (`app.py` `EST` 상수). ⚠️ 6~7월은 실제 EDT(UTC-4)라 1시간 차 — §11.6 참고 |
+| 디자인 | 다크: bg `#0a0e17` / card `#0f1422` / border `#1a2035`. team1 `#1D9E75`(초록) / team2 `#378ADD`(파랑) / amber `#EF9F27` / text `#e2e8f0` |
+| 차트 | Chart.js CDN (LIVE 페이지만, 현재 미주력) |
 
 ---
 
@@ -56,47 +59,75 @@
 
 ### 5.1 BALLDONTLIE FIFA API
 - **베이스 URL:** `https://api.balldontlie.io/fifa/worldcup/v1/`
-- **API 키:** `.env` → `BALLDONTLIE_API_KEY`
-- **⚠️ 실제 rate limit: 분당 5 요청** (헤더 `x-ratelimit-limit: 5`로 확인됨). 운영자 키가 GOAT 플랜(600/분)이 아닌 것으로 추정. `data_pipeline.py` `_get()`이 응답 헤더 `x-ratelimit-remaining`/`reset`을 읽어 동적 페이싱.
+- **API 키:** `.env` → `BALLDONTLIE_API_KEY` (Railway는 환경변수)
+- **⚠️ 실제 rate limit: 분당 5 요청.** `data_pipeline.py` `_get()`이 응답 헤더 `x-ratelimit-remaining`/`reset`을 읽어 동적 페이싱.
 - **사용 엔드포인트:** teams, matches, team_match_stats, player_match_stats, match_shots, match_momentum, match_events, rosters
-- **2018 데이터엔 team-level xG 없음** (2022는 있음). `match_shots`의 `xg`/`xgot`는 양 시즌 모두 있음.
+- **2018 데이터엔 team-level xG 없음** (2022/2026은 있음). `match_shots`의 `xg`/`xgot`는 존재.
 
 ### 5.2 Polymarket Gamma API
-- **URL:** `https://gamma-api.polymarket.com`
-- **인증:** 없음 (무료)
-- **⚠️ 경기별 W/D/L 마켓 없음.** 토너먼트 단위만 존재 (조 우승, 16강/8강/4강 진출, Golden Boot/Ball/Glove, props).
-- **올바른 엔드포인트:** `/events?tag_slug=world-cup` (NOT `/markets?tag=soccer` — 그건 필터 무시되고 디폴트 페이지 반환).
+- **URL:** `https://gamma-api.polymarket.com`, 인증 없음
+- **⚠️ 경기별 W/D/L 마켓 없음.** 토너먼트 단위만. **현재 MATCHIQ UI엔 표시 안 함** (polymarket.py 코드는 남아있으나 app.py에서 import 제거됨).
 
 ---
 
-## 6. 예측 모델 (실제 아키텍처)
+## 6. 예측 모델 (실제 아키텍처 — `model.py` 7 엔진)
 
-**원래 계획이었던 XGBoost + Platt scaling 안 씀.** 순수 Python 5 엔진 (전부 `model.py`):
+**XGBoost/scipy 안 씀. 순수 Python.**
 
-| 엔진 | 역할 |
-|---|---|
-| **EloEngine** | 표준 ELO + 무승부 모델 (`_DRAW_SIGMA=350`) + 2026 호스트(+50)/CONMEBOL 근접(+20) 보너스 |
-| **TacticalEngine** | 약점 zone 분석, 점유율 영향(슬로프 10%p당 5%p), 고지대 보정 (Estadio Azteca 등), 조별리그 상황 모티베이션 |
-| **PlayerMatchupEngine** | 임팩트 스코어 (xG×30 + pass_rate×20 + recov×1.5 + key_passes×4), 휴식일 피로도, 월드컵 동기부여 |
-| **PatternMatcher** | z-score 정규화 유클리드 거리 → 유사도%. 분산=0 피처는 1e9 std로 자동 무시. 레드카드 영향(분 단위 swing) |
-| **NarrativeEngine** | 다른 엔진 출력만 받아 한국어 리포트 조립. API echo 절대 금지 — 모든 숫자는 엔진 계산 결과 |
+| 엔진 | 역할 | UI 표시 |
+|---|---|---|
+| **EloEngine** | 표준 ELO + 무승부 모델(`_DRAW_SIGMA=350`) + 호스트/근접 보너스 | rating 숫자만 |
+| **DixonColesEngine** | **메인 모델.** bivariate Poisson + low-score 보정 ρ + 스코어라인 매트릭스 | ✅ W/D/L·xG·스코어라인 |
+| **GroupSituationEngine** | 2026 포맷(12조×4팀, 3위 상위 8팀) 순위·타이브레이커 + 잔여일정 brute-force 시나리오 → 진출 상황 | ✅ situation note |
+| **PatternMatcher** | z-score 유클리드 유사도 → upset 확률 | ✅ upset % |
+| **TacticalEngine** | 약점 zone, 점유율, 고지대 (한국어 출력) | ❌ 미표시 |
+| **PlayerMatchupEngine** | 임팩트 스코어, 피로도 (한국어 출력) | ❌ 미표시 |
+| **NarrativeEngine** | 한국어 리포트 조립 | ❌ 미표시 (UI 영어라 app.py가 영어 내러티브 생성) |
 
-**ELO 시드:** `app.py`의 `INITIAL_RATINGS_2026` dict — Tier 1 (1700-1780) ~ Tier 4 (1310-1410). 그 위에 2018+2022 결과 replay. (1500부터 시작 안 함 — Spain 1500에서 시작하면 절대 1700 못 도달.)
+### 6.1 DixonColes 5단계 λ 보정 (`predict_from_db`)
+```
+λ_final = base_attack
+        × elo_weight       [ELO 강도비, 10**(elo_diff/1600), clamp 0.6–1.67]
+        × away_defense     [DB 팀강도 _team_strengths_from_db, 2026 골 기반]
+        × player_xG_adj    [_player_xg_adjustment, 최근 라인업 xG/평균, 0.7–1.4]
+        × situation_mult   [GroupSituation lambda_multiplier]
+        × notes_adj        [apply_user_notes, 가산식]
+```
+- 최종 lam/mu clamp `[0.3, 3.0]`. 결과 dict: `win_draw_loss`, `expected_goals`, `top_scorelines`, `matrix`, `situation`, `player_adjustment`, `notes_adjustment`, `strength_source`.
+- **ρ = -0.1514** — `estimate_rho()`가 2018+2022 128경기로 **MLE(golden-section search)** 추정. scipy 안 씀(순수 Python). `DixonColesEngine.__init__`에서 호출, `_RHO_CACHE`로 1회만. `RHO_SOURCE` = "estimated_from_data"/"fallback_default".
+
+### 6.2 ELO 시드 (FIFA 랭킹 기반)
+- **`model.py`의 `FIFA_POINTS_2026`** (48개 본선국, 2026.6 FIFA 포인트) → `INITIAL_RATINGS_2026 = {team: 1500 + (pts-1500)*0.8}` 정규화.
+- ⚠️ **app.py가 아니라 model.py에 있음** (이전엔 app.py 임의값이었음 — FIFA 기반으로 교체+이전). app.py는 `from model import INITIAL_RATINGS_2026`.
+- `build_2026_elo()`가 이 시드 위에 2026 완료 경기 replay (stage-aware K: group 20 / R32 30 / QF 40 / SF·F 50).
+- app.py `_build_live_elo_2026()`가 시드 baseline + build_2026_elo 결과 overlay.
+
+### 6.3 예측 추적 (`model.py`)
+- **`save_prediction()`** — predictions 테이블에 킥오프 전 예측 저장.
+- **`compute_brier_score(season=2026)`** — 완료+예측 경기 멀티클래스 Brier `Σ(p−o)²`.
 
 ---
 
-## 7. 웹사이트 구조 (PRE / LIVE / POST)
+## 7. 웹사이트 구조 (MATCHIQ)
 
-### PRE-MATCH (현재 주력)
-승/무/패 % → 이전 경기 복기 → 이번 경기 핵심 → 모델 근거 3가지 → TOP 3 선수 → 유사 과거 경기 → 경고 시그널 → 월드컵 특수 요소 → Polymarket 배당 → 내 메모 입력.
+### `base.html`
+공통 레이아웃 (title MATCHIQ, IBM Plex Mono, style.css, **Twemoji 스크립트**). index/match가 상속.
 
-### LIVE (스켈레톤만)
-- 60초 폴링 (`/stream/<id>` SSE)
-- 라이브 데이터 푸시 워커는 아직 없음 — 매 60s DB 폴링만
-- Chart.js 모멘텀/점유율 차트 (`data-phase="live"`일 때만 활성)
+### `/` (index.html) — 사이드바 + 메인
+- **사이드바(220px):** "MATCHIQ" 로고 + 날짜별(EST) 경기 그룹 (TODAY / JUN 14 …, 최근 7 EST일). 완료=muted "FT 7-1", 예정="14:00 EST", LIVE=amber. 국기 포함.
+- **메인:** 오늘(EST) 경기 카드 — 팀명별 DixonColes 확률 + xG + situation note + "View Analysis →".
 
-### POST-MATCH
-현재 `/match/<id>`로 리다이렉트만. 별도 페이지 미구현.
+### `/match/<id>` (match.html) — PRE / POST 모드 (Home/Away 레이블 없음)
+- **헤더:** 국기+팀명, ctx_line ("GROUP G · MATCHDAY 1 · 14:00 EST"). POST는 스코어 크게.
+- **확률 바:** team1/draw/team2 (인라인 width+background, `<div>` 블록 — §11.7).
+- **PRE:** Pre-Match Analysis(영어 내러티브) + 수학블록(λ/μ/ρ/P(0-0)…) + **MODEL EDGE**(suggested_bet) + Scoreline TOP5(결과별 색) + Team Strength.
+- **POST:** Prediction vs Result + 예측 적중 ✓/✗ + Brier + **SEASON RECORD** + **구조화 Post-Match Review**(got_right/missed/key_factors) + Scoreline + Team Strength.
+
+### `/api/brier`
+`compute_brier_score` 결과 JSON `{brier_score, n_matches}`. match.html이 fetch.
+
+### 백그라운드 동작 (`app.py` `_live_sync_loop`, import 시 데몬 스레드 기동)
+`sync_live_lite()` → (완료 경기 시) `enrich_completed_matches_2026()` + `_elo=None`(재빌드 트리거) → `_run_due_predictions()`(킥오프 2h 전 경기 예측 저장). 라이브 있으면 60s, 없으면 300s. `ENABLE_LIVE_SYNC=0`로 끔.
 
 ---
 
@@ -104,24 +135,28 @@
 
 ```
 worldcup-predictor/
-├── app.py                # Flask 라우트 + 엔진 워밍 + SSE
-├── model.py              # 5개 엔진 + DB historical loader + INITIAL_RATINGS_2026
-├── database.py           # 듀얼 백엔드 + PostgreSQL 호환 레이어
-├── data_pipeline.py      # BALLDONTLIE 백필 (CLI: backfill/sync/today/live/names/events)
-├── polymarket.py         # Polymarket Gamma 클라이언트
-├── migrate.py            # SQLite → Railway PG 일회성 데이터 마이그레이션
+├── app.py                # Flask 라우트 + 엔진 워밍 + 백그라운드 sync + 영어 내러티브/model_edge/season_record + TEAM_FLAGS + EST
+├── model.py              # 7 엔진 + INITIAL_RATINGS_2026/FIFA_POINTS_2026 + estimate_rho + save_prediction + compute_brier_score
+├── database.py           # 듀얼 백엔드 + PostgreSQL 호환 레이어(_translate_sql)
+├── data_pipeline.py      # BALLDONTLIE 백필/sync (CLI: backfill/sync/today/live/names/events) + sync_live_lite + enrich_completed_matches_2026
+├── polymarket.py         # Polymarket Gamma 클라이언트 (현재 UI 미사용)
+├── migrate.py            # SQLite → Railway PG 일회성 마이그레이션
 ├── Procfile              # web: gunicorn app:app --workers 1
 ├── requirements.txt
 ├── templates/
-│   ├── index.html        # 오늘 경기 카드 목록
-│   └── match.html        # PRE/LIVE/POST 통합
+│   ├── base.html         # 공통 레이아웃 + Twemoji
+│   ├── index.html        # 사이드바 + 오늘 경기 카드
+│   └── match.html        # PRE/POST 분석 리포트
 ├── static/
-│   ├── style.css         # ESPN/Opta 다크 테마
-│   └── charts.js         # Chart.js + SSE 클라이언트
+│   ├── style.css         # MATCHIQ 다크 테마 (IBM Plex Mono)
+│   ├── charts.js         # Chart.js + SSE 클라이언트 (LIVE용)
+│   ├── screenshot_prematch.png   # README용
+│   └── screenshot_postmatch.png  # README용
+├── README.md             # MATCHIQ 공개 문서 (방법론/아키텍처)
 ├── .env                  # 로컬 비밀키 (gitignored)
-├── .gitignore            # .env, *.db, __pycache__/, .gstack/
+├── .gitignore            # .env, *.db, __pycache__/, *.pyc, .DS_Store, .gstack/
 ├── CLAUDE.md             # ← 이 파일
-└── worldcup.db           # 로컬 SQLite (gitignored, 128경기 백필됨)
+└── worldcup.db           # 로컬 SQLite (gitignored)
 ```
 
 ---
@@ -136,13 +171,13 @@ gunicorn
 psycopg2-binary
 ```
 
-**원래 계획에 있던 xgboost / scikit-learn / numpy / pandas / flask-cors는 한 줄도 import 안 함 — 제거됨.** Railway 빌드 시간/메모리 부담 줄임.
+**xgboost/scikit-learn/numpy/pandas/scipy/flask-cors 한 줄도 import 안 함.** MLE(estimate_rho)도 순수 Python golden-section. scipy 추가 금지 — Railway 빌드 깨짐.
 
 ---
 
 ## 10. 환경 변수
 
-### 로컬 `.env`
+### 로컬 `.env` (gitignored — git에 절대 안 올라감, 검증됨)
 ```
 BALLDONTLIE_API_KEY=실제키
 FLASK_SECRET_KEY=...
@@ -150,88 +185,105 @@ FLASK_DEBUG=True
 ```
 
 ### Railway Variables
-- `BALLDONTLIE_API_KEY` — 필수 (오늘 경기 / 매치 디테일 API 호출)
-- `DATABASE_URL` — Railway Postgres 서비스 attach 시 자동 주입. `database.py`가 감지해서 PostgreSQL 경로 선택
-- `PORT` — Railway 자동 주입. gunicorn이 사용
-- `DEBUG_TRACEBACK` — 진단용 토글. 켜져 있으면 에러 발생 시 풀 트레이스백을 브라우저에 표시 (운영 중엔 반드시 꺼야 함, 보안 위험)
+- `BALLDONTLIE_API_KEY` — 필수
+- `DATABASE_URL` — Railway Postgres attach 시 자동 주입. `database.py`가 감지 → PostgreSQL 경로
+- `PORT` — Railway 자동 주입
+- `DEBUG_TRACEBACK` — 켜면 에러 시 브라우저에 traceback (운영 중 반드시 꺼야 함, 보안 위험)
+- `ENABLE_LIVE_SYNC` — 기본 on. 백그라운드 sync 스레드 토글. **워커 여러 개면 한 곳 빼고 0으로** (rate-limit)
 
 ---
 
 ## 11. 함정 (Gotchas) — **새 세션 필독**
 
 ### 11.1 BALLDONTLIE
-- **`match_ids[]=X` 배열 형식 필수.** `match_id=X` 단수형은 silently ignored되어 디폴트 페이지 반환. `database.py`의 `MATCH_FILTER_KEY = "match_ids[]"` 강제.
-- **Rate limit dynamic pacing.** 응답 헤더의 `x-ratelimit-remaining`이 ≤1이면 `x-ratelimit-reset`까지 sleep. 정적 throttle만 쓰면 429 풀잎.
-- **2018 데이터엔 team-level `expected_goals` NULL.** 패턴 매칭 휴리스틱이 xG 없을 때 shots_diff로 fallback.
-- **`/players` 페이지네이션은 BALLDONTLIE 전체 DB 30k+ 명을 반환** → burst limit 강제 트리거. `/players` 벌크 호출 금지. 대신 백필 중 player_id 등장 시 placeholder로 등록하고 나중에 `/rosters?team_ids[]=X`로 이름 채움.
-- **`match_events`의 type 필드는 `incident_type`** (NOT `event_type` 또는 `type`). 또 `player_id`가 nested (`{"player": {"id":...}}`).
+- **`match_ids[]=X` 배열 형식 필수** (`match_id=X` 단수형 무시됨). `database.py` `MATCH_FILTER_KEY`.
+- **Rate limit 동적 페이싱** (`x-ratelimit-remaining`≤1이면 reset까지 sleep).
+- **2018 team-level xG NULL** → 휴리스틱 fallback.
+- **`/players` 벌크 호출 금지** (30k+ 반환, burst limit). placeholder 등록 후 `/rosters`로 이름 채움.
+- **API raw 응답의 type 필드는 `incident_type`** (nested player). **단, DB 적재 후 컬럼명은 `event_type`** — DB 쿼리는 `event_type` 사용.
 
 ### 11.2 PostgreSQL 호환 (database.py `_translate_sql`)
-호환 레이어가 자동 처리하지만 이해는 해둘 것:
-- **`?` → `%s`** (psycopg2 paramstyle)
-- **`%` → `%%`** (psycopg2가 `%`를 format 문자로 인식 → 리터럴 `%` 보호. LIKE 패턴에서 특히 중요)
-- **`INSERT OR IGNORE INTO ...` → `INSERT INTO ... ON CONFLICT DO NOTHING`**
-- **GROUP BY strict:** SELECT의 비집계 컬럼은 GROUP BY에 다 들어가야 함. `GROUP BY p.id`만 있고 `p.name`을 SELECT하면 에러.
-- **HAVING은 SELECT alias 못 씀.** `HAVING games >= 1` 안 됨, `HAVING COUNT(*) >= 1` 또는 제거.
-- **집계함수 + ORDER BY 비집계 컬럼은 서브쿼리로 감싸야 함.** (예: `_recent_team_stats`가 "최근 3경기 평균" 하려면 ORDER BY + LIMIT를 inner SELECT로)
+- `?`→`%s`, `%`→`%%`, `INSERT OR IGNORE`→`ON CONFLICT DO NOTHING`.
+- **GROUP BY strict:** SELECT 비집계 컬럼 전부 GROUP BY에. (`GROUP BY t.id, t.name`)
+- **HAVING은 SELECT alias 못 씀.**
+- **집계 + ORDER BY 비집계는 서브쿼리로.**
 
 ### 11.3 Railway
-- **`database.init_db()`는 모듈 레벨에서 호출되어야 함.** `if __name__ == "__main__":` 안에 두면 gunicorn에선 안 돌아감 → 첫 요청에서 "no such table" 크래시.
-- **`.gitignore`의 `*.db`가 worldcup.db를 제외.** Railway 첫 부팅 시 빈 DB. 데이터 옮기려면 `python migrate.py` (로컬에서 실행, DATABASE_URL은 Railway PG 공용 URL).
-- **`Procfile`은 `web: gunicorn app:app --workers 1`** — Railway Nixpacks가 자동으로 `--bind 0.0.0.0:$PORT` 처리.
-- **gunicorn 워커 1개 필수 (`--workers 1`) — 멀티워커 시 sync 스레드 중복 실행으로 rate-limit 즉시 초과.**
-- **에러 핸들러 `@app.errorhandler(Exception)`** 가 traceback을 stderr로 dump → Railway Logs에 표시. `DEBUG_TRACEBACK=1` 시 브라우저에도 표시.
+- **`database.init_db()` 모듈 레벨 호출** (gunicorn 대응).
+- **`*.db` gitignore** → Railway 첫 부팅 빈 DB. `migrate.py` 또는 백그라운드 sync로 채움.
+- **`Procfile`: `web: gunicorn app:app --workers 1`** — **워커 1개 필수** (멀티워커 시 sync 스레드 중복 → rate-limit 초과).
+- **에러 핸들러**가 traceback을 stderr+stdout으로 dump (`=== 500 ERROR ===` 마커) → Railway Logs. `DEBUG_TRACEBACK=1` 시 브라우저.
+- railway CLI는 이 개발 환경에 없음 — 로그는 Railway 웹 대시보드 또는 운영자가 직접 `! railway logs`.
 
 ### 11.4 Polymarket
-- **`outcomePrices`는 JSON 문자열** (NOT 리스트). `json.loads()` 필요.
-- **이벤트 제목에 앞쪽 공백 있는 경우 종종 있음** (예: `" World Cup: Messi to Score a Free Kick?"`). 디스플레이 전에 `.strip()`.
-- **Golden Boot Winner 마켓은 안 만들어져 있음** (2026 시점). Bronze/Silver Boot만 존재.
+- `outcomePrices`는 JSON 문자열. 제목 앞 공백 `.strip()`. Golden Boot Winner 마켓 없음.
 
 ### 11.5 모델
-- **`PatternMatcher` 분산=0 피처 처리:** 과거 매치가 elo_diff=0으로만 채워져 있는데 현재 입력은 큰 elo_diff면, std=1 fallback으로 그 피처가 distance 폭주시킴. → `std = 1e9` (무시)로 처리.
-- **2018 매치는 `was_upset` 휴리스틱이 shots 기반** (xG 없으므로). `model.py` `_load_historical_from_db` 참고.
+- **`PatternMatcher` 분산=0 피처 → std=1e9 무시.**
+- **2018 `was_upset`는 shots 기반** (xG 없음).
+- **GroupSituationEngine 한계 (전부 docstring에 명시):** 페어플레이=총 카드수(옐로/레드 구분 데이터 없음), FIFA랭킹=정적 근사 dict, 잔여일정 시나리오는 대표 스코어(승 2-0/무 1-1/패 0-2)+동점 순위 범위화, 3위 cross-group 컷 미평가, 타이브레이커 1-3 재귀 재적용 미구현.
+- **GroupSituation note는 영어** ("Qualification open", "Must win to survive", "Eliminated" 등). index.html 이모지 분기가 이 영어 문자열 키워드에 의존.
+
+### 11.6 시간대 (EST)
+- `app.py` `EST = timezone(timedelta(hours=-5))` **고정 UTC-5**. 사용자가 "EST UTC-5"로 명시.
+- ⚠️ **2026 월드컵은 6~7월 = 실제 미동부 EDT(UTC-4)** → 표시가 실제보다 1시간 이르게 나옴. 진짜 현지시각 원하면 `hours=-4`로. **미결 결정사항.**
+- index "오늘"/사이드바/카드/match ctx 모두 EST. UTC date와 EST date가 자정 경계서 어긋날 수 있어 index는 UTC 쿼리창 ±1일 넓혀 Python에서 EST date로 필터.
+
+### 11.7 프런트 렌더 (Railway에서 자주 터짐)
+- **확률/스코어라인 바는 `<div>`(블록) + 인라인 `style="width:X%; background:#..."`로.** `<span>`(inline)에 width 주면 **안 먹혀 빈 바**. CSS 클래스만 의존 금지 (CSS 로드 실패/inline 한계). 색도 인라인으로 박을 것.
+- **국기 이모지는 Twemoji 필수** (base.html). 없으면 Windows에서 "SE"/"TN"으로 깨짐. `_flag()`는 정상 이모지 반환(country_code 아님), 미지정 시 `""`.
+
+### 11.8 PostgreSQL Decimal (★ Railway 500 주범이었음)
+- **PG `AVG(정수컬럼)`은 `decimal.Decimal` 반환** → `Decimal * float` TypeError. (SQLite는 float라 로컬선 멀쩡 → 디버깅 함정)
+- **DB에서 가져온 숫자는 전부 `float()` 캐스팅.** `_team_strengths_from_db`, `_player_xg_adjustment`, `predict_from_db`의 ha/hd/aa/ad 등에 적용됨. 새 DB 쿼리 추가 시 항상 float() 래핑.
 
 ---
 
 ## 12. 진행 상태
 
-- [x] 폴더 구조 + 초기 GitHub setup
-- [x] `database.py` 11 tables + 듀얼 백엔드 + PG 호환 레이어
-- [x] `data_pipeline.py` BALLDONTLIE 백필 (CLI 5종) + dynamic rate-limit pacing
-- [x] `model.py` 5 엔진 (ELO/Tactical/Player/Pattern/Narrative) + INITIAL_RATINGS_2026 베이스라인
-- [x] `polymarket.py` 토너먼트 마켓 클라이언트
-- [x] `app.py` Flask 라우트 + 엔진 워밍 + SSE 스켈레톤 + 에러 핸들러
-- [x] `templates/` + `static/` ESPN/Opta UI (PRE-MATCH 풀, LIVE 차트 준비)
-- [x] Railway 배포 (gunicorn + PostgreSQL)
-- [x] `migrate.py` SQLite → Railway PG 일회성 스크립트
-- [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py` 실행) — 운영자가 직접 해야 함
-- [ ] LIVE phase 실시간 데이터 푸시 워커 (현재는 60초 DB 폴링만)
-- [ ] POST-MATCH 전용 페이지 + 모델 캘리브레이션 추적 (브라이어 스코어 등)
-- [ ] 사용자 메모(`user_notes`) → 모델 확률 후처리 반영
-- [ ] Monte Carlo 토너먼트 진출 확률 시뮬레이션
-- [ ] 모바일 QA + 디자인 폴리시
+완료:
+- [x] database.py 11 tables + 듀얼 백엔드 + PG 호환
+- [x] data_pipeline.py 백필 + 동적 페이싱 + **`sync_live_lite` + `enrich_completed_matches_2026`**
+- [x] model.py 7 엔진 (+ DixonColes, GroupSituation) + FIFA 기반 ELO 시드 + MLE ρ
+- [x] **DixonColes 웹 연결** — match/index 확률이 DixonColes 산출 (5단계 λ)
+- [x] **백그라운드 sync 워커** (스레드) + 완료 시 enrich + ELO 재빌드 + 예측 저장
+- [x] **POST-MATCH 페이지 + 예측 추적 (save_prediction/compute_brier_score/`/api/brier`/SEASON RECORD)**
+- [x] **user_notes → 모델 λ 반영** (`apply_user_notes`, app.py `_load_user_notes`)
+- [x] **MATCHIQ 리브랜드** (영어 UI, 사이드바, PRE/POST, 국기, EST, MODEL EDGE, 구조화 리뷰)
+- [x] README.md (방법론/아키텍처) + 스크린샷
+- [x] Railway 배포
+
+미완 / 다음:
+- [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py`) — 또는 백그라운드 sync가 채우게 (운영자 확인 필요)
+- [ ] **EST vs EDT 결정** (§11.6) — 현재 UTC-5, 6~7월 실제는 UTC-4
+- [ ] **SEASON RECORD가 0/0** — 기존 완료 경기는 예측저장 기능 이전 종료라 채점 대상 없음. 앞으로 킥오프 전 저장된 경기부터 채워짐
+- [ ] LIVE phase 실시간 푸시 (현재 60s DB 폴링 + 백그라운드 sync)
+- [ ] Monte Carlo 토너먼트 진출 시뮬레이션 (3위 cross-group 컷 포함)
+- [ ] 모바일 QA + style.css 폴리시 (새 클래스 일부 CSS 없이 인라인만 적용된 곳 있음)
+- [ ] model.py의 미표시 엔진(Tactical/Player/Narrative) 한국어 → 영어 정리 (UI 미노출이라 보류 중)
 
 ---
 
 ## 13. 작업 규칙
 
-1. **단순화 우선.** 요청한 것만 구현. 추측성 기능·추상화 금지.
-2. **외과적 변경.** 요청과 무관한 인접 코드 손대지 말 것.
-3. **검증 가능한 목표.** 모든 작업은 "어떻게 확인할지" 명시.
-4. **할루시네이션 금지.** 검증 안 된 API/엔드포인트/응답 단언 금지.
-5. **실거래 영향.** 확률 계산·표시에 무성의한 디폴트 금지. 데이터 결손 시 명시.
-6. **언어.** 사용자 대화 한국어. 코드/커밋/주석/로그 영어.
-7. **파괴적 명령 사전 확인.** `rm`, force-push, hard reset, DB drop 등은 운영자 승인 후.
+1. **단순화 우선.** 요청한 것만. 추측성 추상화 금지.
+2. **외과적 변경.** 무관한 인접 코드 손대지 말 것.
+3. **검증 가능한 목표.** "어떻게 확인할지" 명시 (test_client/렌더 검증).
+4. **할루시네이션 금지.** 검증 안 된 API/응답/테이블 단언 금지.
+5. **실거래 영향.** 확률에 무성의 디폴트 금지. 데이터 결손 시 명시.
+6. **언어.** 운영자 대화 한국어. **웹 UI·코드·커밋·주석·로그 영어.**
+7. **파괴적 명령 사전 확인.** rm/force-push/hard reset/DB drop 등.
 
 ---
 
 ## 14. GitHub
 
-- Remote: `https://github.com/Gunnerista/worldcup-predictor.git`
-- Branch: `main`
-- 커밋 메시지: 영어
-- 최근 큰 마일스톤 커밋 (참고용):
-  - `Add complete web interface: ESPN-style PRE/LIVE/POST reports`
-  - `Add PostgreSQL support for Railway deployment`
-  - `Fix psycopg2 literal % escape in LIKE patterns`
-  - `Add SQLite -> Railway PostgreSQL migration script`
+- Remote: `https://github.com/Gunnerista/worldcup-predictor.git`, branch `main`
+- 커밋 메시지 영어. **민감정보 git 유출 없음 확인됨** (.env/*.db gitignore, 히스토리·추적파일·스크린샷 전부 클린 — 2026-06-15 점검).
+- 최근 마일스톤:
+  - `feat: MATCHIQ rebrand — full English, team names replace home/away, date sidebar, pre/post modes`
+  - `feat: wire DixonColes + GroupSituation + user notes to web UI`
+  - `feat: prediction tracker (auto pre-kickoff save + Brier calibration)`
+  - `fix: cast Decimal to float for PostgreSQL compatibility`
+  - `feat: replace arbitrary ELO seeds with FIFA ranking points (2026 pre-tournament)`
+  - `feat: MLE rho estimation from 2018/2022 World Cup data`
