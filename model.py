@@ -1208,7 +1208,213 @@ def _run_demo() -> None:
     }
 
     print(narrator.generate_full_report(inp["match_meta"], bundle))
+# ===========================================================================
+# Engine 6: DixonColesEngine  — bivariate Poisson + low-score correction
+# ===========================================================================
+
+import math as _math
+
+class DixonColesEngine:
+    """
+    Converts ELO ratings into a full scoreline probability matrix via
+    Dixon-Coles bivariate Poisson with low-score correction (rho).
+
+    Reference: Dixon & Coles (1997) "Modelling Association Football Scores
+    and Inefficiencies in the Football Betting Market".
+
+    Usage:
+        dc = DixonColesEngine()
+        result = dc.predict(home_elo=1850, away_elo=1720,
+                            home_attack=1.45, home_defense=0.85,
+                            away_attack=1.10, away_defense=1.05)
+        print(result["top_scorelines"])
+        print(result["win_draw_loss"])
+    """
+
+    # Default scoring rates — calibrated to 2022 WC avg 2.69 goals/match
+    DEFAULT_HOME_ATTACK:   float = 1.35
+    DEFAULT_HOME_DEFENSE:  float = 0.90
+    DEFAULT_AWAY_ATTACK:   float = 1.10
+    DEFAULT_AWAY_DEFENSE:  float = 1.00
+    HOME_ADVANTAGE:        float = 1.10   # neutral venue → 1.0
+    MAX_GOALS:             int   = 6      # compute P(X=i, Y=j) for i,j in 0..MAX_GOALS
+    RHO:                   float = -0.13  # low-score dependence param (empirical, football)
+
+    @staticmethod
+    def _tau(x: int, y: int, lam: float, mu: float, rho: float) -> float:
+        """Dixon-Coles correction factor for low-scoring outcomes."""
+        if x == 0 and y == 0:
+            return 1.0 - lam * mu * rho
+        if x == 0 and y == 1:
+            return 1.0 + lam * rho
+        if x == 1 and y == 0:
+            return 1.0 + mu * rho
+        if x == 1 and y == 1:
+            return 1.0 - rho
+        return 1.0
+
+    @staticmethod
+    def _poisson_pmf(k: int, lam: float) -> float:
+        if lam <= 0:
+            return 1.0 if k == 0 else 0.0
+        return (_math.exp(-lam) * (lam ** k)) / _math.factorial(k)
+
+    def _expected_goals(
+        self,
+        home_elo: float, away_elo: float,
+        home_attack: float, home_defense: float,
+        away_attack: float, away_defense: float,
+        neutral_venue: bool = True,
+    ) -> tuple[float, float]:
+        """
+        λ_home = home_attack × away_defense × home_advantage × elo_weight
+        λ_away = away_attack × home_defense × elo_weight_inv
+        """
+        elo_diff = home_elo - away_elo
+        # ELO-based strength ratio: 400-point diff → factor ≈ 1.33 / 0.75
+        elo_weight = 10 ** (elo_diff / 800.0)   # softer than std 400 for goals
+
+        ha = 1.0 if neutral_venue else self.HOME_ADVANTAGE
+
+        lam = home_attack * away_defense * ha * elo_weight
+        mu  = away_attack * home_defense * (1.0 / elo_weight)
+
+        # Clamp to reasonable range [0.2, 4.0]
+        lam = max(0.2, min(4.0, lam))
+        mu  = max(0.2, min(4.0, mu))
+        return lam, mu
+
+    def scoreline_matrix(
+        self,
+        lam: float, mu: float,
+        rho: float | None = None,
+    ) -> dict[tuple[int, int], float]:
+        """
+        Returns {(home_goals, away_goals): probability} for 0..MAX_GOALS each.
+        Normalised so all entries sum to 1.0.
+        """
+        rho = rho if rho is not None else self.RHO
+        n = self.MAX_GOALS
+        matrix: dict[tuple[int, int], float] = {}
+
+        for i in range(n + 1):
+            for j in range(n + 1):
+                p = (
+                    self._tau(i, j, lam, mu, rho)
+                    * self._poisson_pmf(i, lam)
+                    * self._poisson_pmf(j, mu)
+                )
+                matrix[(i, j)] = max(0.0, p)
+
+        # Normalise (Dixon-Coles correction can slightly perturb the sum)
+        total = sum(matrix.values())
+        if total > 0:
+            matrix = {k: v / total for k, v in matrix.items()}
+
+        return matrix
+
+    def predict(
+        self,
+        home_elo: float,
+        away_elo: float,
+        home_attack:   float | None = None,
+        home_defense:  float | None = None,
+        away_attack:   float | None = None,
+        away_defense:  float | None = None,
+        neutral_venue: bool = True,
+        top_n: int = 5,
+    ) -> dict:
+        """
+        Full prediction bundle:
+          lam, mu          — expected goals
+          matrix           — full P(i, j) dict
+          win_draw_loss    — {home_win, draw, away_win} marginals
+          top_scorelines   — [(score_str, pct), ...] top N by probability
+          expected_goals   — {"home": lam, "away": mu}
+        """
+        ha = home_attack  if home_attack  is not None else self.DEFAULT_HOME_ATTACK
+        hd = home_defense if home_defense is not None else self.DEFAULT_HOME_DEFENSE
+        aa = away_attack  if away_attack  is not None else self.DEFAULT_AWAY_ATTACK
+        ad = away_defense if away_defense is not None else self.DEFAULT_AWAY_DEFENSE
+
+        lam, mu = self._expected_goals(
+            home_elo, away_elo, ha, hd, aa, ad, neutral_venue
+        )
+
+        matrix = self.scoreline_matrix(lam, mu)
+
+        home_win = sum(p for (i, j), p in matrix.items() if i > j)
+        draw     = sum(p for (i, j), p in matrix.items() if i == j)
+        away_win = sum(p for (i, j), p in matrix.items() if i < j)
+
+        top = sorted(matrix.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+        top_scorelines = [
+            {
+                "scoreline": f"{i}-{j}",
+                "home_goals": i,
+                "away_goals": j,
+                "probability_pct": round(p * 100, 1),
+            }
+            for (i, j), p in top
+        ]
+
+        return {
+            "expected_goals": {
+                "home": round(lam, 3),
+                "away": round(mu, 3),
+            },
+            "win_draw_loss": {
+                "home_win": round(home_win * 100, 1),
+                "draw":     round(draw     * 100, 1),
+                "away_win": round(away_win * 100, 1),
+            },
+            "top_scorelines":   top_scorelines,
+            "matrix":           matrix,
+            "model":            "Dixon-Coles Bivariate Poisson",
+            "rho":              self.RHO,
+        }
+
+    def format_report_kr(self, home_name: str, away_name: str, result: dict) -> str:
+        """한국어 컨설팅 리포트 포맷."""
+        eg = result["expected_goals"]
+        wdl = result["win_draw_loss"]
+        top = result["top_scorelines"]
+
+        lines = [
+            "=" * 55,
+            f"  ⚽  Dixon-Coles 스코어라인 분석",
+            f"     {home_name}  vs  {away_name}",
+            "=" * 55,
+            f"  예상 골 수   :  {home_name} {eg['home']}  |  {away_name} {eg['away']}",
+            "",
+            f"  승/무/패 확률",
+            f"    {home_name} 승  :  {wdl['home_win']}%",
+            f"    무 승 부    :  {wdl['draw']}%",
+            f"    {away_name} 승  :  {wdl['away_win']}%",
+            "",
+            "  ─── 가장 가능성 높은 스코어 TOP 5 ───",
+        ]
+        for rank, s in enumerate(top, 1):
+            bar = "█" * int(s["probability_pct"] / 1.5)
+            lines.append(
+                f"  {rank}위  {s['scoreline']:>5}   {s['probability_pct']:5.1f}%  {bar}"
+            )
+        lines += [
+            "",
+            f"  모델: {result['model']}  |  ρ={result['rho']}",
+            "=" * 55,
+        ]
+        return "\n".join(lines)
 
 
 if __name__ == "__main__":
     _run_demo()
+
+    # --- Dixon-Coles scoreline prediction --------------------------------
+    inp = _korea_vs_portugal_inputs()
+    dc_engine = DixonColesEngine()
+    dc_result = dc_engine.predict(
+        home_elo=inp["home_elo"],
+        away_elo=inp["away_elo"],
+    )
+    print(dc_engine.format_report_kr("한국", "포르투갈", dc_result))
