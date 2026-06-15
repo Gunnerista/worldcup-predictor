@@ -39,6 +39,7 @@ from model import (
     EloEngine, TacticalEngine, PlayerMatchupEngine,
     PatternMatcher, NarrativeEngine, _load_historical_from_db,
     build_2026_elo, DixonColesEngine, save_prediction,
+    INITIAL_RATINGS_2026,
 )
 
 try:
@@ -84,87 +85,10 @@ _elo: Optional[EloEngine] = None
 _pattern_matcher: Optional[PatternMatcher] = None
 
 
-# --------------------------------------------------------------------------
-# 2026 team-strength baselines — calibrated to approximate team quality
-# entering the World Cup. Replaying 2018+2022 results on top of these
-# baselines makes the final ELO reflect both historical form AND broad
-# strength (so debutants like Cabo Verde aren't stuck at 1500 default).
-#
-# WHY THIS EXISTS:
-#   Pure replay from 1500 underrates Spain (~1506) because Spain's actual
-#   2018/2022 performances were lukewarm relative to her favored status.
-#   Without baselines, debutants get 1500 and look equal to Spain. Wrong.
-#   Names exactly match teams.name in the DB (BALLDONTLIE canonical).
-# --------------------------------------------------------------------------
-
-INITIAL_RATINGS_2026: dict[str, float] = {
-    # Tier 1 — top contenders
-    "Brazil":              1780,
-    "Argentina":           1780,
-    "France":              1770,
-    "Spain":               1730,
-    "England":             1730,
-    "Portugal":            1720,
-    "Netherlands":         1700,
-    "Germany":             1690,
-    "Belgium":             1680,
-    "Italy":               1680,
-    "Croatia":             1670,
-    "Uruguay":             1670,
-
-    # Tier 2 — strong qualifiers
-    "USA":                 1620,
-    "Mexico":              1620,
-    "Switzerland":         1640,
-    "Denmark":             1630,
-    "Poland":              1600,
-    "Senegal":             1610,
-    "Morocco":             1640,
-    "Japan":               1620,
-    "South Korea":         1590,
-    "Colombia":            1610,
-    "Ecuador":             1570,
-    "Serbia":              1570,
-    "Australia":           1550,
-    "Canada":              1550,
-    "Norway":              1590,
-    "Sweden":              1570,
-    "Austria":             1580,
-    "Türkiye":              1580,
-
-    # Tier 3 — mid
-    "Iran":                1540,
-    "Tunisia":             1500,
-    "Saudi Arabia":        1500,
-    "Egypt":               1530,
-    "Wales":               1520,
-    "Scotland":            1520,
-    "Iceland":             1480,
-    "Algeria":             1490,
-    "Ghana":               1490,
-    "Cameroon":            1510,
-    "Nigeria":             1530,
-    "Côte d'Ivoire":       1510,
-    "Czechia":             1530,
-    "Russia":              1540,
-    "Bosnia & Herzegovina":1500,
-    "Paraguay":            1500,
-    "Peru":                1500,
-    "Costa Rica":          1450,
-    "Panama":              1430,
-    "New Zealand":         1440,
-    "South Africa":        1430,
-
-    # Tier 4 — debutants / weaker
-    "Cabo Verde":          1350,
-    "Curaçao":             1310,
-    "Haiti":               1330,
-    "Uzbekistan":          1360,
-    "Jordan":              1370,
-    "Iraq":                1380,
-    "DR Congo":            1420,
-    "Qatar":               1410,
-}
+# 2026 team-strength baselines now live in model.py as INITIAL_RATINGS_2026,
+# derived from FIFA Men's World Ranking points (single source of truth, imported
+# above). They seed every team so replaying 2018/2022 reflects both historical
+# form AND broad strength (debutants aren't stuck at the 1500 default).
 
 
 def _stage_key(stage_str: Optional[str]) -> str:

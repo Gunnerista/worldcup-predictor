@@ -52,6 +52,38 @@ _DRAW_SIGMA: float = 350.0
 
 
 # ===========================================================================
+# 2026 team-strength seeds — FIFA Men's World Ranking points (~June 2026,
+# pre-tournament) for the 48 qualified nations. Source: football-ranking.com,
+# Wikipedia (FIFA Men's World Ranking, 11 Jun 2026), ESPN. Team set matches the
+# qualifiers present in the database.
+# ===========================================================================
+
+FIFA_POINTS_2026: dict[str, float] = {
+    "Argentina": 1877, "Spain": 1875, "France": 1871, "England": 1828,
+    "Portugal": 1768, "Brazil": 1766, "Morocco": 1755, "Netherlands": 1754,
+    "Belgium": 1742, "Germany": 1736, "Croatia": 1715, "Colombia": 1698,
+    "Mexico": 1687, "Senegal": 1684, "Uruguay": 1673, "USA": 1671,
+    "Japan": 1662, "Switzerland": 1650, "Iran": 1620, "Türkiye": 1606,
+    "Ecuador": 1599, "Austria": 1597, "South Korea": 1592, "Australia": 1579,
+    "Algeria": 1571, "Egypt": 1562, "Canada": 1559, "Norway": 1557,
+    "Côte d'Ivoire": 1541, "Panama": 1539, "Sweden": 1510, "Czechia": 1506,
+    "Paraguay": 1505, "Scotland": 1503, "Tunisia": 1476, "DR Congo": 1474,
+    "Uzbekistan": 1459, "Qatar": 1450, "Iraq": 1446, "South Africa": 1428,
+    "Saudi Arabia": 1423, "Bosnia & Herzegovina": 1387, "Jordan": 1387,
+    "Cabo Verde": 1371, "Ghana": 1346, "Curaçao": 1294, "Haiti": 1293,
+    "New Zealand": 1275,
+}
+
+# Normalise FIFA points to the ELO scale: a 1500-point side maps to ELO 1500,
+# and the rating spread is compressed to 0.8x (the FIFA spread is wider than the
+# ELO scale we replay 2018/2022 results on).
+INITIAL_RATINGS_2026: dict[str, float] = {
+    team: 1500.0 + (pts - 1500.0) * 0.8
+    for team, pts in FIFA_POINTS_2026.items()
+}
+
+
+# ===========================================================================
 # Engine 1: EloEngine
 # ===========================================================================
 
@@ -2174,32 +2206,19 @@ def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
     Build live 2026 ELO ratings by replaying completed 2026 matches in
     chronological order on top of FIFA-ranking-based seeds.
 
-    Unlike app.py's _build_elo_from_history() (which seeds from the broad
-    INITIAL_RATINGS_2026 baseline and replays 2018+2022), this replays ONLY the
-    2026 tournament itself: top 10 seeded from current FIFA ranking, everyone
-    else left at DEFAULT_ELO.
+    Replays ONLY the 2026 tournament on top of the FIFA-ranking-normalised
+    INITIAL_RATINGS_2026 seeds (all 48 qualifiers). Teams not in the seed dict
+    fall back to DEFAULT_ELO.
 
     Returns {team_name: current_elo} for every team with a rating. If no 2026
-    results are available yet, returns just the FIFA seeds (no replay).
+    results are available yet, returns just the seeds (no replay).
 
     Works against either backend via database.get_connection() (SQLite locally,
     PostgreSQL on Railway). db_path is honoured only for the SQLite backend.
     """
     import database
 
-    # FIFA-ranking-based seeds (top 10 only; others fall back to DEFAULT_ELO).
-    seeds = {
-        "Spain":       1950,
-        "France":      1940,
-        "England":     1920,
-        "Brazil":      1910,
-        "Argentina":   1900,
-        "Portugal":    1880,
-        "Netherlands": 1860,
-        "Germany":     1850,
-        "Belgium":     1830,
-        "Uruguay":     1810,
-    }
+    seeds = INITIAL_RATINGS_2026
 
     def stage_key(s: str | None) -> str:
         s = (s or "").lower()
