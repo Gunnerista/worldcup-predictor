@@ -56,14 +56,21 @@ _session.headers["Authorization"] = API_KEY
 # Low-level HTTP
 # --------------------------------------------------------------------------
 
-_MAX_429_RETRIES = 6
+_MAX_429_RETRIES = 8
 
 
 def _get(path: str, params: dict[str, Any] | None = None) -> dict:
-    """Throttled GET with exponential backoff on 429 (1s, 2s, 4s, 8s, 16s, 32s).
+    """Throttled GET that respects BALLDONTLIE's rate-limit response headers.
 
-    BALLDONTLIE has both a 600/min cap AND a short-burst limit; THROTTLE alone
-    is not sufficient. Backoff handles the burst limiter.
+    Strategy:
+      - Sleep THROTTLE before every call (baseline pacing).
+      - On 200: read `x-ratelimit-remaining`; if it's 0 or 1, proactively sleep
+        until `x-ratelimit-reset` so the NEXT call doesn't 429.
+      - On 429: sleep until `x-ratelimit-reset` (or exponential fallback).
+
+    This is necessary because the active API key reports `x-ratelimit-limit: 5`
+    (not the 600/min GOAT cap). Static throttling can't keep up; dynamic
+    pacing on the headers is the only reliable approach.
     """
     url = f"{BASE}{path}"
     backoff = 1.0
@@ -72,16 +79,37 @@ def _get(path: str, params: dict[str, Any] | None = None) -> dict:
         time.sleep(THROTTLE)
         r = _session.get(url, params=params, timeout=TIMEOUT_SEC)
         last_resp = r
+
+        remaining_hdr = r.headers.get("x-ratelimit-remaining")
+        reset_hdr     = r.headers.get("x-ratelimit-reset")
+
         if r.status_code != 429:
             r.raise_for_status()
+            # Proactive: if we used up the bucket, sleep until reset
+            try:
+                rem  = int(remaining_hdr) if remaining_hdr is not None else None
+                rst  = int(reset_hdr)     if reset_hdr     is not None else None
+            except ValueError:
+                rem, rst = None, None
+            if rem is not None and rst is not None and rem <= 1:
+                wait = max(0.0, float(rst) - time.time() + 1.0)
+                if 0 < wait < 90:
+                    time.sleep(wait)
             try:
                 return r.json()
             except ValueError:
                 return {}
-        # 429 — back off and retry
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 32.0)
-    # all retries exhausted
+
+        # 429 path: sleep until reset (header) or exponential fallback
+        wait = backoff
+        try:
+            if reset_hdr is not None:
+                wait = max(backoff, float(int(reset_hdr)) - time.time() + 1.0)
+        except ValueError:
+            pass
+        time.sleep(min(max(wait, 1.0), 90.0))
+        backoff = min(backoff * 2, 64.0)
+
     if last_resp is not None:
         last_resp.raise_for_status()
     return {}
@@ -348,16 +376,53 @@ def upsert_momentum(conn, items: list[dict]) -> None:
 
 
 def upsert_events(conn, items: list[dict]) -> None:
+    """API quirks for /match_events:
+      - event type key is `incident_type` (card/goal/...); `incident_class` is subtype
+      - player is nested: {"player": {"id": ..., "name": ...}}
+      - no team_id; only `is_home` -> resolved via matches table
+      - player.name is available — opportunistically upgrade placeholder names
+    """
     cur = conn.cursor()
+
+    # Resolve home/away team_id for each match in this batch
+    match_ids = {it.get("match_id") for it in items if it.get("match_id") is not None}
+    team_lookup: dict[int, dict] = {}
+    if match_ids:
+        q = "SELECT id, home_team_id, away_team_id FROM matches WHERE id IN ({})".format(
+            ",".join("?" * len(match_ids))
+        )
+        for r in conn.execute(q, list(match_ids)).fetchall():
+            team_lookup[r["id"]] = {"home": r["home_team_id"], "away": r["away_team_id"]}
+
     for it in items:
+        mid = it.get("match_id")
+        is_home = it.get("is_home")
+        team_id = None
+        if mid in team_lookup and is_home is not None:
+            team_id = team_lookup[mid]["home" if is_home else "away"]
+
+        player_obj = it.get("player") or {}
+        pid = player_obj.get("id")
+        pname = player_obj.get("name")
+        if pid:
+            # Opportunistically upgrade placeholder name with real name from event payload
+            _ensure_player(conn, pid, team_id)
+            if pname:
+                conn.execute(
+                    "UPDATE players SET name = ?, team_id = COALESCE(team_id, ?) "
+                    "WHERE id = ? AND name LIKE 'Player #%'",
+                    (pname, team_id, pid),
+                )
+
+        event_type = it.get("incident_type") or it.get("incident_class") or it.get("event_type")
+        if not event_type:
+            continue   # skip malformed rows
+
         cur.execute(
             """INSERT INTO match_events
                (match_id, minute, event_type, team_id, player_id)
                VALUES (?, ?, ?, ?, ?)""",
-            (it.get("match_id"),
-             it.get("minute") or it.get("time_minute"),
-             it.get("event_type") or it.get("type"),
-             it.get("team_id"), it.get("player_id")),
+            (mid, it.get("time_minute") or it.get("minute"), event_type, team_id, pid),
         )
     conn.commit()
 
@@ -536,6 +601,40 @@ def _cli() -> int:
 
     if cmd == "backfill":
         backfill_historical(seasons=(2018, 2022))
+        return 0
+
+    if cmd == "events":
+        # Re-run JUST the events endpoint over all matches in DB.
+        conn = database.get_connection()
+        try:
+            ids = [r["id"] for r in conn.execute("SELECT id FROM matches ORDER BY id").fetchall()]
+            print(f"re-ingesting events for {len(ids)} matches...")
+            _ingest_per_match_data(conn, ids[:0])  # no-op warmup
+            # call only the events endpoint, reusing the per-match loop machinery
+            from itertools import islice
+            total = len(ids)
+            done = 0
+            for i in range(0, total, BATCH_SIZE_MATCHES):
+                chunk = ids[i:i + BATCH_SIZE_MATCHES]
+                items: list[dict] = []
+                base_params = {MATCH_KEY: [str(m) for m in chunk]}
+                cursor = None
+                while True:
+                    p = dict(base_params)
+                    p["per_page"] = PAGE_SIZE
+                    if cursor:
+                        p["cursor"] = cursor
+                    payload = _get("/match_events", p)
+                    items.extend(payload.get("data") or [])
+                    cursor = (payload.get("meta") or {}).get("next_cursor")
+                    if not cursor:
+                        break
+                upsert_events(conn, items)
+                done += len(chunk)
+                print(f"  events: 경기 {done}/{total}  rows={len(items)}")
+            print(f"events in DB now: {conn.execute('SELECT COUNT(*) FROM match_events').fetchone()[0]}")
+        finally:
+            conn.close()
         return 0
 
     if cmd == "names":
