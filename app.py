@@ -198,20 +198,33 @@ def _ensure_engines() -> None:
 # --------------------------------------------------------------------------
 
 def _recent_team_stats(conn, team_name: str) -> dict:
-    """Aggregated mean of last-3 completed matches for a team."""
+    """Aggregated mean of last-3 completed matches for a team.
+
+    The aggregation must run OVER the recent-3 subset, so ORDER BY + LIMIT
+    happens inside a subquery; the outer SELECT then aggregates. Doing it in
+    one statement (the previous shape) silently returned the average over
+    ALL matches on SQLite, and failed strict-mode validation on PostgreSQL.
+    """
     row = conn.execute("""
         SELECT
-            AVG(ts.possession)    AS possession_pct,
-            AVG(ts.xg_total)      AS xg_total,
-            AVG(ts.shots_total)   AS shots_total,
-            AVG(ts.shots_on_target) AS shots_on_target,
+            AVG(possession)       AS possession_pct,
+            AVG(xg_total)         AS xg_total,
+            AVG(shots_total)      AS shots_total,
+            AVG(shots_on_target)  AS shots_on_target,
             COUNT(*)              AS games
-        FROM team_stats ts
-        JOIN teams t ON t.id = ts.team_id
-        JOIN matches m ON m.id = ts.match_id
-        WHERE t.name = ? AND m.status = 'completed'
-        ORDER BY m.kickoff_utc DESC
-        LIMIT 3
+        FROM (
+            SELECT
+                ts.possession,
+                ts.xg_total,
+                ts.shots_total,
+                ts.shots_on_target
+            FROM team_stats ts
+            JOIN teams t ON t.id = ts.team_id
+            JOIN matches m ON m.id = ts.match_id
+            WHERE t.name = ? AND m.status = 'completed'
+            ORDER BY m.kickoff_utc DESC
+            LIMIT 3
+        ) recent
     """, (team_name,)).fetchone()
 
     if not row or not row["games"]:
@@ -263,8 +276,7 @@ def _key_players_for(home_name: str, away_name: str) -> list:
             JOIN teams t ON t.id = ps.team_id
             WHERE t.name IN (?, ?)
               AND p.name NOT LIKE 'Player #%'
-            GROUP BY p.id
-            HAVING games >= 1
+            GROUP BY p.id, p.name
             ORDER BY AVG(ps.expected_goals) DESC
             LIMIT 25
         """, (home_name, away_name)).fetchall()
