@@ -383,7 +383,7 @@ def generate_post_match_review(b) -> dict:
     key_factors = []
     s1, s2 = b["strength1"], b["strength2"]
     if s1.get("xg_for") is None or s2.get("xg_for") is None:
-        key_factors.append("Limited 2026 data — attack/defense strength defaulted to 1.0")
+        key_factors.append("No 2026 xG data yet — first match of tournament for this team")
     elo_diff = b.get("elo_diff", 0)
     stronger = t1 if elo_diff > 0 else t2
     if abs(elo_diff) >= 100 and aw != stronger:
