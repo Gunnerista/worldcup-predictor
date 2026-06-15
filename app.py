@@ -618,6 +618,20 @@ def _live_sync_loop() -> None:
                   f"(seen={result['matches_seen']}, "
                   f"completed+={result['newly_completed']}, "
                   f"live={result['in_progress']})", flush=True)
+
+            # A match just finished -> pull its player-level data once.
+            if result.get("newly_completed", 0) > 0:
+                try:
+                    with _sync_lock:
+                        enriched = data_pipeline.enrich_completed_matches_2026()
+                    print(f"[sync] enriched {enriched['enriched']} matches "
+                          f"(player_stats={enriched['player_stats']}, "
+                          f"shots={enriched['shots']}, "
+                          f"events={enriched['events']})", flush=True)
+                except Exception as e:
+                    # Enrich failure must not kill the sync loop.
+                    print(f"[sync] enrich error: {e}", file=sys.stderr, flush=True)
+
             interval = LIVE_INTERVAL_SEC if result.get("in_progress", 0) > 0 else IDLE_INTERVAL_SEC
         except Exception as e:
             # Never let the worker thread die — log and keep looping.

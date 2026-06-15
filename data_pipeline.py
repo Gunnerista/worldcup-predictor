@@ -651,6 +651,67 @@ def sync_live_lite() -> dict:
         conn.close()
 
 
+def enrich_completed_matches_2026() -> dict:
+    """Backfill player-level data for completed 2026 matches that lack it.
+
+    sync_live_lite() intentionally skips player_match_stats / match_shots /
+    match_events to protect the rate limit during live play. This fills them in
+    afterwards, but ONLY for matches that are already 'completed' AND have no
+    player_stats rows yet (so re-running is cheap and idempotent).
+
+    Endpoints are pulled in order: player_match_stats -> match_shots ->
+    match_events. Per-call pacing is handled by _get() (it reads the
+    x-ratelimit headers), so this is safe even on the 5-req/min key — just slow.
+
+    Returns: {candidates, enriched, player_stats, shots, events}
+    """
+    database.init_db()
+    conn = database.get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id FROM matches
+            WHERE season = 2026 AND status = 'completed'
+              AND id NOT IN (SELECT DISTINCT match_id FROM player_stats)
+            ORDER BY id
+            """
+        ).fetchall()
+        match_ids = [r["id"] for r in rows]
+        if not match_ids:
+            return {"candidates": 0, "enriched": 0,
+                    "player_stats": 0, "shots": 0, "events": 0}
+
+        print(f"enriching {len(match_ids)} completed 2026 matches...")
+
+        ps_items = _fetch_for_matches("/player_match_stats", match_ids)
+        upsert_player_stats(conn, ps_items)
+
+        shot_items = _fetch_for_matches("/match_shots", match_ids)
+        upsert_shots(conn, shot_items)
+
+        ev_items = _fetch_for_matches("/match_events", match_ids)
+        upsert_events(conn, ev_items)
+
+        # Derived columns (player_stats.shots, team_stats.xgot_total) now that
+        # match_shots is populated.
+        compute_derived(conn)
+
+        # "enriched" = matches that actually received player_stats (a completed
+        # match with no API data should not be counted as enriched).
+        enriched_ids = {it.get("match_id") for it in ps_items
+                        if it.get("match_id") is not None}
+
+        return {
+            "candidates": len(match_ids),
+            "enriched": len(enriched_ids),
+            "player_stats": len(ps_items),
+            "shots": len(shot_items),
+            "events": len(ev_items),
+        }
+    finally:
+        conn.close()
+
+
 def get_today_matches(today: date | None = None) -> list[dict]:
     """2026 matches scheduled for the given UTC date (defaults to today)."""
     target = today or date.today()
