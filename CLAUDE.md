@@ -3,7 +3,7 @@
 이 파일은 프로젝트 단일 진실 공급원(SSoT). 컨텍스트가 꽉 차서 새 세션을 열어도, 이 문서만 읽으면 그대로 이어갈 수 있어야 함.
 
 > **새 세션 필독:** §11 함정(Gotchas) 먼저 읽어. 같은 함정에 두 번 빠지지 마.
-> **최종 갱신:** 2026-06-15 (MATCHIQ 리브랜드 + DixonColes 웹 연결 + 예측 추적 완료 시점)
+> **최종 갱신:** 2026-06-16 (Eastern DST 전환 + "No prediction recorded" + POST 스냅샷-only odds + Railway 수동 예측 INSERT)
 
 ---
 
@@ -33,15 +33,23 @@
 - **라이브:** `https://worldcup-predictor-production-c55a.up.railway.app` (Railway, GitHub push 시 자동 배포)
 - **로컬 DB:** `worldcup.db` (SQLite) — 2018+2022 128경기 + **2026 104경기** 포함, gitignored
 - **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
-- **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, EST 시간.
+- **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, **Eastern(DST 자동) 시간**.
 
-### 3.1 마지막 세션 인수인계 (2026-06-15)
-이번 세션에서 한 것: MATCHIQ 리브랜드 → DixonColes/GroupSituation/user_notes 웹 연결 → 예측추적+Brier+SEASON RECORD → 국기(Twemoji)/EST/색상 → MODEL EDGE(PRE+POST "Pre-Match Signal") → predicted_winner를 model edge 기준으로 → **predictions에 edge 스냅샷 컬럼 추가** → POST 상단 "Pre-Match Odds"(저장값) 표시 → 오염 예측(match 14, 88.6% Belgium, 캘리브레이션 이전 저장) **로컬 SQLite에서 삭제** (predictions 현재 **0건, clean**).
+### 3.1 마지막 세션 인수인계 (2026-06-16)
+이번 세션에서 한 것:
+1. **"No prediction recorded"** — POST-MATCH에서 predictions에 해당 match_id 행이 없으면 CORRECT/INCORRECT·Brier·구조화 리뷰를 **아예 안 만들고** "No prediction recorded" 표시. (이전엔 결과 후 재계산으로 가짜 적중 판정) — `app.py` `has_prediction = bool(prow)` 분기 + `match.html` `{% if bundle.has_prediction %}`.
+2. **Eastern DST 전환** — `EST = timezone(UTC-5)` 고정 → **`EASTERN = ZoneInfo("America/New_York")`**(DST 자동). 여름 EDT(UTC-4)/겨울 EST. 라벨은 `_est_label()`=`tzname()`로 동적("EST"/"EDT"), 하드코딩 "EST" 전부 제거. `requirements.txt`에 **`tzdata` 추가**(Windows zoneinfo 필수, Railware Linux도 안전). **§11.6 EST vs EDT 미결사안 → EDT(America/New_York)로 결정 완료.**
+3. **POST "Pre-Match Odds"는 스냅샷-only** — 저장된 예측 없으면 상단 확률 바 자체를 렌더 안 함(완료 경기의 오염된 ELO 재계산값 표시 금지). `app.py` no-snapshot 분기에서 `p1/pdraw/p2=None` + 템플릿 `{% if phase != 'post' or bundle.has_prediction %}`.
+4. **Railway PG 예측 수동 INSERT** — match 14(Belgium vs Egypt, 실제 1-1) 예측을 운영자 요청으로 직접 INSERT: `home/draw/away_pct=32/48/19`(0–100 스케일), `created_at='2026-06-15 15:00:00'`(UTC=11:00 EDT), `model_version='manual'`, `suggested_bet='DRAW — 22pp above market average'`, `draw_edge=22.0`, `total_xg=NULL`. → POST에서 **✓ CORRECT**, SEASON RECORD 1/1.
 
-**⚠️ 즉시 할 일 (미완):**
-- **Railway PG에서 `DELETE FROM predictions WHERE match_id=14`** — 로컬만 지웠음. 운영자가 Railway 대시보드 Query 또는 `DATABASE_URL` 세팅 후 직접 실행해야 함 (이 dev 환경엔 DATABASE_URL 없어 접근 불가). 없으면 `deleted: 0`(원래 없었음)일 수도 — 어느 쪽이든 안전.
-- **EST vs EDT 결정** (§11.6): 현재 UTC-5, 6~7월 실제는 UTC-4.
-- README 스크린샷 2개는 커밋됨(`static/screenshot_*.png`).
+**Railway predictions 현재 상태 (2건):** match 14(manual, 위), match 15(Saudi vs Uruguay, 백그라운드 자동저장 — edge 컬럼 NULL, edge 기능 배포 이전 저장본). **로컬 SQLite는 0건(clean).**
+
+**커밋:** `63455fd`(No prediction recorded + Eastern DST), `fc359f8`(POST 스냅샷-only odds). 둘 다 push+Railway 배포됨.
+
+**⚠️ 남은 일:**
+- **DATABASE_URL은 이 dev 환경에 자동 주입 안 됨** — Bash 툴에 인라인(`DATABASE_URL="postgresql://..." python ...`)으로 넘겨야 Railway PG 접근. (운영자가 PowerShell `$env:`로 세팅해도 Bash 서브프로세스엔 전파 안 됨.)
+- **Railway PG 실데이터 마이그레이션** 여부 확인(`migrate.py` vs 백그라운드 sync). teams 112/matches 104는 들어가 있음.
+- README 스크린샷 2개 커밋됨(`static/screenshot_*.png`) — Eastern/odds 변경 반영하려면 재촬영 필요(선택).
 
 ---
 
@@ -57,7 +65,7 @@
 | 프런트 | Jinja2 템플릿 + Vanilla JS — `base.html` 상속 구조 |
 | 폰트 | **IBM Plex Mono** (숫자/레이블), system-ui (내러티브 본문) |
 | 이모지/국기 | **Twemoji** (CDN) — Windows에서 국기 이모지가 "SE" 같은 글자로 깨지는 것 방지 |
-| 시간대 | **EST 고정 UTC-5** (`app.py` `EST` 상수). ⚠️ 6~7월은 실제 EDT(UTC-4)라 1시간 차 — §11.6 참고 |
+| 시간대 | **US Eastern, DST 자동** (`app.py` `EASTERN = ZoneInfo("America/New_York")`). 여름 EDT(UTC-4)/겨울 EST. 라벨 동적(`_est_label`). `tzdata` 의존성 필요 — §11.6 |
 | 디자인 | 다크: bg `#0a0e17` / card `#0f1422` / border `#1a2035`. team1 `#1D9E75`(초록) / team2 `#378ADD`(파랑) / amber `#EF9F27` / text `#e2e8f0` |
 | 차트 | Chart.js CDN (LIVE 페이지만, 현재 미주력) |
 
@@ -181,9 +189,11 @@ python-dotenv
 requests
 gunicorn
 psycopg2-binary
+tzdata
 ```
 
 **xgboost/scikit-learn/numpy/pandas/scipy/flask-cors 한 줄도 import 안 함.** MLE(estimate_rho)도 순수 Python golden-section. scipy 추가 금지 — Railway 빌드 깨짐.
+**`tzdata`** = 순수 데이터 패키지(빌드 없음). Windows에서 `ZoneInfo("America/New_York")` 해석에 필수(Linux는 시스템 tz DB 있어 선택적이나 명시).
 
 ---
 
@@ -236,10 +246,12 @@ FLASK_DEBUG=True
 - **GroupSituationEngine 한계 (전부 docstring에 명시):** 페어플레이=총 카드수(옐로/레드 구분 데이터 없음), FIFA랭킹=정적 근사 dict, 잔여일정 시나리오는 대표 스코어(승 2-0/무 1-1/패 0-2)+동점 순위 범위화, 3위 cross-group 컷 미평가, 타이브레이커 1-3 재귀 재적용 미구현.
 - **GroupSituation note는 영어** ("Qualification open", "Must win to survive", "Eliminated" 등). index.html 이모지 분기가 이 영어 문자열 키워드에 의존.
 
-### 11.6 시간대 (EST)
-- `app.py` `EST = timezone(timedelta(hours=-5))` **고정 UTC-5**. 사용자가 "EST UTC-5"로 명시.
-- ⚠️ **2026 월드컵은 6~7월 = 실제 미동부 EDT(UTC-4)** → 표시가 실제보다 1시간 이르게 나옴. 진짜 현지시각 원하면 `hours=-4`로. **미결 결정사항.**
-- index "오늘"/사이드바/카드/match ctx 모두 EST. UTC date와 EST date가 자정 경계서 어긋날 수 있어 index는 UTC 쿼리창 ±1일 넓혀 Python에서 EST date로 필터.
+### 11.6 시간대 (US Eastern, DST 자동) — ✅ 결정됨 (2026-06-16)
+- `app.py` **`EASTERN = ZoneInfo("America/New_York")`** (DST 자동). 여름 EDT(UTC-4)/겨울 EST. 이전 `EST=timezone(UTC-5)` 고정에서 전환 — 6~7월 월드컵 = 실제 EDT라 운영자가 America/New_York 선택.
+- **표시(display)만 Eastern, 내부 로직·저장은 전부 UTC.** `_est_dt/_est_time/_est_label`이 변환 담당. `_run_due_predictions`의 킥오프 2h 전 비교는 **전부 tz-aware UTC** (DST 무관, 회귀 없음). predictions `created_at`도 UTC naive 저장.
+- 라벨은 하드코딩 금지 — `_est_label()`=`tzname()`("EST"/"EDT") 사용. 카드는 `tz` 필드, 사이드바는 `est.tzname()`.
+- **`tzdata` 의존성 필수** (Windows). 없으면 `ZoneInfoNotFoundError` 500.
+- index "오늘"/사이드바/카드/match ctx 모두 Eastern. UTC date와 Eastern date가 자정 경계서 어긋날 수 있어 index는 UTC 쿼리창 ±1일 넓혀 Python에서 Eastern date로 필터.
 
 ### 11.7 프런트 렌더 (Railway에서 자주 터짐)
 - **확률/스코어라인 바는 `<div>`(블록) + 인라인 `style="width:X%; background:#..."`로.** `<span>`(inline)에 width 주면 **안 먹혀 빈 바**. CSS 클래스만 의존 금지 (CSS 로드 실패/inline 한계). 색도 인라인으로 박을 것.
@@ -263,14 +275,16 @@ FLASK_DEBUG=True
 - [x] **user_notes → 모델 λ 반영** (`apply_user_notes`, app.py `_load_user_notes`)
 - [x] **MATCHIQ 리브랜드** (영어 UI, 사이드바, PRE/POST, 국기, EST, MODEL EDGE, 구조화 리뷰)
 - [x] **edge 스냅샷** (predictions에 suggested_bet/draw_edge/total_xg) + predicted_winner를 model edge 기준으로 + POST "Pre-Match Odds/Signal"
+- [x] **"No prediction recorded"** — 스냅샷 없는 완료 경기는 가짜 적중 판정 안 함 (`63455fd`)
+- [x] **Eastern DST 자동** (`ZoneInfo America/New_York` + `tzdata` + 동적 라벨) — §11.6 결정 완료 (`63455fd`)
+- [x] **POST "Pre-Match Odds" 스냅샷-only** — 재계산값 표시 차단 (`fc359f8`)
 - [x] README.md (방법론/아키텍처) + 스크린샷 커밋
 - [x] Railway 배포
 
 미완 / 다음:
-- [ ] **★ Railway PG `DELETE FROM predictions WHERE match_id=14`** — 로컬은 삭제됨, Railway는 운영자 직접 (§3.1)
-- [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py`) — 또는 백그라운드 sync가 채우게 (운영자 확인 필요)
-- [ ] **EST vs EDT 결정** (§11.6) — 현재 UTC-5, 6~7월 실제는 UTC-4
-- [ ] **SEASON RECORD** — 로컬 predictions 0건(clean)으로 리셋됨. 앞으로 킥오프 전 저장되는 깨끗한 예측(캘리브레이션된 모델 + edge 스냅샷)부터 채워짐
+- [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py`) — 또는 백그라운드 sync가 채우게 (운영자 확인 필요). teams 112/matches 104는 적재됨.
+- [ ] **SEASON RECORD** — Railway predictions 현재 2건(match 14 manual=CORRECT, match 15 auto/edge NULL). 로컬은 0건(clean). 앞으로 킥오프 전 자동저장(edge 포함)부터 채워짐.
+- [ ] **README 스크린샷 재촬영**(선택) — Eastern/odds 변경 반영.
 - [ ] LIVE phase 실시간 푸시 (현재 60s DB 폴링 + 백그라운드 sync)
 - [ ] Monte Carlo 토너먼트 진출 시뮬레이션 (3위 cross-group 컷 포함)
 - [ ] 모바일 QA + style.css 폴리시 (새 클래스 일부 CSS 없이 인라인만 적용된 곳 있음)
@@ -295,6 +309,8 @@ FLASK_DEBUG=True
 - Remote: `https://github.com/Gunnerista/worldcup-predictor.git`, branch `main`
 - 커밋 메시지 영어. **민감정보 git 유출 없음 확인됨** (.env/*.db gitignore, 히스토리·추적파일·스크린샷 전부 클린 — 2026-06-15 점검).
 - 최근 마일스톤:
+  - `fix: POST-MATCH Pre-Match Odds shows snapshot only, never recompute` (fc359f8)
+  - `feat: show "No prediction recorded" + DST-aware Eastern time` (63455fd)
   - `feat: MATCHIQ rebrand — full English, team names replace home/away, date sidebar, pre/post modes`
   - `feat: wire DixonColes + GroupSituation + user notes to web UI`
   - `feat: prediction tracker (auto pre-kickoff save + Brier calibration)`
