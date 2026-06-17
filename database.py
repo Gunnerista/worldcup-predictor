@@ -224,6 +224,9 @@ def _schema_statements(is_pg: bool) -> list[str]:
             suggested_bet   TEXT,
             draw_edge       REAL,
             total_xg        REAL,
+            predicted_outcome TEXT,
+            confidence        REAL,
+            is_tossup         INTEGER,
             FOREIGN KEY (match_id) REFERENCES matches(id)
         )
         """,
@@ -421,10 +424,13 @@ def init_db(db_path: Optional[Path] = None) -> None:
 
 
 def _ensure_prediction_edge_columns(conn) -> None:
-    """Idempotently add edge-snapshot columns to an EXISTING predictions table
+    """Idempotently add snapshot columns to an EXISTING predictions table
     (CREATE TABLE IF NOT EXISTS won't add columns to a table that already exists).
-    Works on both SQLite and PostgreSQL."""
-    wanted = [("suggested_bet", "TEXT"), ("draw_edge", "REAL"), ("total_xg", "REAL")]
+    Works on both SQLite and PostgreSQL. is_tossup is INTEGER (0/1) for
+    cross-backend portability."""
+    wanted = [("suggested_bet", "TEXT"), ("draw_edge", "REAL"), ("total_xg", "REAL"),
+              ("predicted_outcome", "TEXT"), ("confidence", "REAL"),
+              ("is_tossup", "INTEGER")]
     try:
         if USE_POSTGRES:
             rows = conn.execute(

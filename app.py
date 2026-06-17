@@ -458,32 +458,35 @@ def _est_label(iso):
     return dt.tzname() if dt else "EST"
 
 
-def generate_model_edge(b) -> dict:
-    """Identify the strongest betting-decision edge from the model output.
+def generate_prediction_label(b) -> dict:
+    """Layer B: pure argmax labeling. The most likely W/D/L outcome IS the
+    prediction — no market baseline, no asymmetric thresholds.
 
-    `draw_edge` compares the model draw probability to a 26% baseline (typical
-    World Cup group-stage draw rate). Advisory only — the operator decides.
+    A symmetric toss-up flag marks matches where the top two outcomes are within
+    5 percentage points (== 0.05 on a probability scale). total_xg is carried as
+    a neutral statistic only — it is NOT a betting lean and never sways the label.
     """
-    draw_edge = b["pdraw"] - 26
+    t1, t2 = b["team1"], b["team2"]
+    ranked = sorted(
+        [("home", b["p1"], t1), ("draw", b["pdraw"], "Draw"), ("away", b["p2"], t2)],
+        key=lambda x: x[1], reverse=True,
+    )
+    outcome, confidence, label = ranked[0]
+    margin = ranked[0][1] - ranked[1][1]          # percentage points
+    is_tossup = margin < 5.0                        # 5pp == 0.05, symmetric
     total_xg = b["eg1"] + b["eg2"]
-    under_lean = total_xg < 2.5
-
-    if draw_edge > 5:
-        suggested = f"DRAW — {draw_edge:.0f}pp above market average"
-    elif under_lean and total_xg < 2.2:
-        suggested = f"UNDER 2.5 — total xG {total_xg:.2f}"
-    elif b["p1"] > 55:
-        suggested = f"{b['team1']} WIN — {b['p1']}% model probability"
-    elif b["p2"] > 55:
-        suggested = f"{b['team2']} WIN — {b['p2']}% model probability"
-    else:
-        suggested = "No clear edge identified"
+    suggested = f"{label} ({round(confidence)}%)" + (" · toss-up" if is_tossup else "")
 
     return {
-        "suggested_bet": suggested,
-        "draw_edge": round(draw_edge, 1),
+        "predicted_outcome": outcome,
+        "label": label,
+        "confidence": round(confidence, 1),
+        "is_tossup": is_tossup,
+        "margin": round(margin, 1),
         "total_xg": round(total_xg, 2),
-        "under_lean": under_lean,
+        "suggested_bet": suggested,
+        # draw_edge is intentionally gone (the 26% baseline was removed); the DB
+        # column is preserved but written NULL for new predictions.
     }
 
 
@@ -513,17 +516,10 @@ def _season_record():
         hp, dp, ap = float(r["hp"]), float(r["dp"]), float(r["ap"])
         hs, as_ = r["hs"], r["as_"]
         actual = "home" if hs > as_ else ("away" if hs < as_ else "draw")
-        # Predicted winner follows the MODEL EDGE rule (probabilities only — the
-        # predictions table has no xG, so the UNDER-2.5 branch is omitted; it
-        # never picks a winner anyway, so results match the match-page logic).
-        if dp - 26 > 5:
-            pred = "draw"
-        elif hp > 55:
-            pred = "home"
-        elif ap > 55:
-            pred = "away"
-        else:
-            pred = max([(hp, "home"), (dp, "draw"), (ap, "away")], key=lambda x: x[0])[1]
+        # Layer B: the predicted outcome is the argmax of the stored distribution
+        # (no market baseline, no asymmetric thresholds). Matches the match-page
+        # labeling exactly, since both derive from the same distribution snapshot.
+        pred = max([(hp, "home"), (dp, "draw"), (ap, "away")], key=lambda x: x[0])[1]
         total += 1
         if pred == actual:
             correct += 1
@@ -643,7 +639,7 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
                           "attack": s2["attack"], "defense": s2["defense"]},
         }
         b["narrative_pre"] = generate_pre_match_narrative(b)
-        b["model_edge"] = generate_model_edge(b)
+        b["prediction"] = generate_prediction_label(b)
 
         if is_post:
             b["season_record"] = _season_record()
@@ -677,38 +673,36 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             # "No prediction recorded" instead.
             b["has_prediction"] = bool(prow)
             if prow:
-                pp1, ppd, pp2 = prow["home_win_pct"], prow["draw_pct"], prow["away_win_pct"]
+                # Distribution snapshot (cast Decimal->float for PostgreSQL — PG
+                # returns REAL columns as decimal.Decimal; see §11.8).
+                pp1 = float(prow["home_win_pct"])
+                ppd = float(prow["draw_pct"])
+                pp2 = float(prow["away_win_pct"])
                 b["pred"] = {"p1": round(pp1), "pdraw": round(ppd), "p2": round(pp2)}
 
                 # POST-MATCH shows the PRE-KICKOFF odds (saved snapshot), not the
                 # post-result recompute. Override the top probability bar.
                 b["p1"], b["pdraw"], b["p2"] = round(pp1), round(ppd), round(pp2)
 
-                # Prefer the edge snapshot stored at prediction time; fall back to
-                # the recomputed model_edge if the prediction predates the snapshot.
-                if prow["suggested_bet"]:
-                    txg = prow["total_xg"]
-                    b["model_edge"] = {
-                        "suggested_bet": prow["suggested_bet"],
-                        "draw_edge": float(prow["draw_edge"]) if prow["draw_edge"] is not None else 0.0,
-                        "total_xg": float(txg) if txg is not None else 0.0,
-                        "under_lean": (float(txg) < 2.5) if txg is not None else False,
-                    }
+                # Layer B: the label is the argmax of the saved distribution
+                # snapshot — always recomputable, identical for new and legacy
+                # rows. The legacy suggested_bet/draw_edge columns are intentionally
+                # NOT used to pick the winner anymore (that reintroduced the old
+                # draw-biased framing). total_xg is read as a neutral statistic.
+                txg = prow["total_xg"]
+                snap = generate_prediction_label({
+                    "team1": t1, "team2": t2,
+                    "p1": pp1, "pdraw": ppd, "p2": pp2,
+                    "eg1": 0.0, "eg2": 0.0,
+                })
+                snap["total_xg"] = float(txg) if txg is not None else None
+                b["prediction"] = snap
 
-                # Predicted winner follows the MODEL EDGE signal (parsed from its
-                # suggested_bet string), falling back to highest probability when
-                # the edge is non-directional ("No clear edge" / "UNDER 2.5").
-                sb = b["model_edge"]["suggested_bet"]
-                if sb.startswith("DRAW"):
-                    predicted_winner = "Draw"
-                elif sb.startswith(f"{t1} WIN"):
-                    predicted_winner = t1
-                elif sb.startswith(f"{t2} WIN"):
-                    predicted_winner = t2
-                else:
-                    predicted_winner = max(
-                        [(pp1, t1), (ppd, "Draw"), (pp2, t2)], key=lambda x: x[0]
-                    )[1]
+                predicted_winner = (
+                    t1 if snap["predicted_outcome"] == "home"
+                    else t2 if snap["predicted_outcome"] == "away"
+                    else "Draw"
+                )
                 b["predicted_winner"] = predicted_winner
                 b["prediction_correct"] = (predicted_winner == actual_winner)
 
@@ -1027,7 +1021,7 @@ def _run_due_predictions() -> int:
             )
             wdl = pred["win_draw_loss"]
             eg = pred["expected_goals"]
-            me = generate_model_edge({
+            label = generate_prediction_label({
                 "team1": home, "team2": away,
                 "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]),
                 "p2": round(wdl["away_win"]),
@@ -1035,8 +1029,11 @@ def _run_due_predictions() -> int:
             })
             save_prediction(r["id"], wdl["home_win"], wdl["draw"], wdl["away_win"],
                             model_version="v1", conn=conn,
-                            suggested_bet=me["suggested_bet"],
-                            draw_edge=me["draw_edge"], total_xg=me["total_xg"])
+                            suggested_bet=label["suggested_bet"],
+                            draw_edge=None, total_xg=label["total_xg"],
+                            predicted_outcome=label["predicted_outcome"],
+                            confidence=label["confidence"],
+                            is_tossup=1 if label["is_tossup"] else 0)
             saved += 1
 
         if saved:

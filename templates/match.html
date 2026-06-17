@@ -76,6 +76,7 @@
         </div>
         <div class="verdict">
             Predicted: <b>{{ bundle.predicted_winner|upper }}</b>
+            {% if bundle.prediction and bundle.prediction.is_tossup %}<span class="muted">(toss-up)</span>{% endif %}
             {% if bundle.prediction_correct %}<span class="ok">✓ CORRECT</span>{% else %}<span class="no">✗ MISS</span>{% endif %}
             &nbsp;&middot;&nbsp;
             <span class="brier">Brier Score: {% if bundle.brier is not none %}{{ '%.2f'|format(bundle.brier) }}{% else %}pending{% endif %}</span>
@@ -85,14 +86,14 @@
         {% endif %}
     </section>
 
-    {% if bundle.model_edge %}
+    {% if bundle.prediction %}
     <section class="section model-edge">
-        <h2>Pre-Match Signal</h2>
-        <div class="me-bet">{{ bundle.model_edge.suggested_bet }}</div>
+        <h2>Pre-Match Prediction</h2>
+        <div class="me-bet">Most likely: {{ bundle.prediction.label }} — {{ bundle.prediction.confidence }}% confidence
+            {% if bundle.prediction.is_tossup %}<span class="no">&nbsp;⚠ Toss-up (&lt;5pp margin)</span>{% endif %}
+        </div>
         <div class="me-stats">
-            <span>Draw edge {{ bundle.model_edge.draw_edge }}pp</span>
-            <span>Total xG {{ bundle.model_edge.total_xg }}</span>
-            <span>Under 2.5 lean: {{ 'yes' if bundle.model_edge.under_lean else 'no' }}</span>
+            <span>Expected total goals (xG sum): {% if bundle.prediction.total_xg is not none %}{{ '%.1f'|format(bundle.prediction.total_xg) }}{% else %}n/a{% endif %}</span>
         </div>
     </section>
     {% endif %}
@@ -146,14 +147,14 @@
 P(0-0) = {{ '%.4f'|format(bundle.p00) }}   P(1-0) = {{ '%.4f'|format(bundle.p10) }}   P(1-1) = {{ '%.4f'|format(bundle.p11) }}</div>
     </section>
 
-    {% if bundle.model_edge %}
+    {% if bundle.prediction %}
     <section class="section model-edge">
-        <h2>Model Edge</h2>
-        <div class="me-bet">{{ bundle.model_edge.suggested_bet }}</div>
+        <h2>Model Prediction</h2>
+        <div class="me-bet">Most likely: {{ bundle.prediction.label }} — {{ bundle.prediction.confidence }}% confidence
+            {% if bundle.prediction.is_tossup %}<span class="no">&nbsp;⚠ Toss-up (&lt;5pp margin)</span>{% endif %}
+        </div>
         <div class="me-stats">
-            <span>Draw edge {{ bundle.model_edge.draw_edge }}pp</span>
-            <span>Total xG {{ bundle.model_edge.total_xg }}</span>
-            <span>Under 2.5 lean: {{ 'yes' if bundle.model_edge.under_lean else 'no' }}</span>
+            <span>Expected total goals (xG sum): {% if bundle.prediction.total_xg is not none %}{{ '%.1f'|format(bundle.prediction.total_xg) }}{% else %}n/a{% endif %}</span>
         </div>
     </section>
     {% endif %}
