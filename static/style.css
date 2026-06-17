@@ -258,3 +258,90 @@ img.emoji { height: 1em; width: 1em; vertical-align: -0.12em; margin: 0 1px; }
     text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted);
     display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
 }
+
+/* ===== Methodology / evaluation page ===== */
+.methodology {
+    max-width: 760px; margin: 0 auto; padding: 28px 20px 64px;
+}
+.methodology .back {
+    display: inline-block; margin-bottom: 18px; color: var(--text-2);
+    text-decoration: none; font-size: 13px;
+}
+.methodology .back:hover { color: var(--text); }
+.eval-head h1 { font-size: 24px; margin: 0 0 4px; }
+.eval-sub { color: var(--text-2); font-size: 13px; margin: 0 0 18px; }
+.anchor-callout {
+    background: var(--card); border: 1px solid var(--border);
+    border-left: 3px solid var(--team1); border-radius: 8px;
+    padding: 14px 16px; font-size: 13.5px; line-height: 1.55; margin-bottom: 26px;
+}
+.anchor-badge {
+    display: inline-block; background: var(--team1); color: #06281c;
+    font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; margin-right: 8px;
+}
+.m-section { margin-bottom: 30px; }
+.m-section h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--text-2); margin: 0 0 12px; font-weight: 700;
+}
+.chart-wrap {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; max-width: 460px;
+}
+.reliability-svg { display: block; }
+.reliability-svg .ax { fill: var(--text-2); font-size: 11px; font-family: inherit; }
+.reliability-svg .ay { text-anchor: end; }
+.legend {
+    list-style: none; display: flex; flex-wrap: wrap; gap: 14px;
+    margin: 12px 0 0; padding: 0; font-size: 12px; color: var(--text-2);
+}
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend .sw { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.legend .sw.dash {
+    background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 8px);
+}
+.caption { font-size: 12px; color: var(--text-2); line-height: 1.5; margin: 12px 0 0; }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.eval-table {
+    width: 100%; border-collapse: collapse; font-size: 13px; min-width: 380px;
+}
+.eval-table th, .eval-table td {
+    text-align: right; padding: 9px 12px; border-bottom: 1px solid var(--border);
+}
+.eval-table th:first-child, .eval-table td:first-child { text-align: left; }
+.eval-table th {
+    color: var(--text-2); font-weight: 700; text-transform: uppercase;
+    font-size: 10px; letter-spacing: .06em;
+}
+.eval-table td.best { color: var(--team1); font-weight: 700; }
+.metric-cards { display: flex; flex-wrap: wrap; gap: 12px; }
+.metric-card {
+    flex: 1 1 180px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+}
+.mc-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-2); margin-bottom: 8px;
+}
+.mc-value { font-size: 20px; font-weight: 700; }
+.mc-value .good { color: var(--team1); }
+.mc-value .mc-arrow, .mc-value .muted { color: var(--muted); font-weight: 400; }
+.mc-foot { font-size: 11px; color: var(--text-2); margin-top: 6px; }
+.limitations { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
+.limitations li { margin-bottom: 8px; }
+.eval-foot {
+    margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-2); line-height: 1.7;
+}
+.eval-foot code { color: var(--text); background: var(--card); padding: 1px 5px; border-radius: 4px; }
+.nav-eval {
+    display: inline-block; margin-top: 10px; font-size: 11px; color: var(--team1);
+    text-decoration: none; letter-spacing: .04em;
+}
+.nav-eval:hover { text-decoration: underline; }
+@media (max-width: 520px) {
+    .methodology { padding: 20px 14px 48px; }
+    .eval-head h1 { font-size: 20px; }
+    .metric-card { flex: 1 1 100%; }
+}

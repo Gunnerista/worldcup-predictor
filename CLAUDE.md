@@ -173,15 +173,19 @@ worldcup-predictor/
 ├── data_pipeline.py      # BALLDONTLIE 백필/sync (CLI: backfill/sync/today/live/names/events) + sync_live_lite + enrich_completed_matches_2026
 ├── polymarket.py         # Polymarket Gamma 클라이언트 (현재 UI 미사용)
 ├── migrate.py            # SQLite → Railway PG 일회성 마이그레이션
+├── backtest_calibration.py # 누수 없는 as-of 캘리브레이션 백테스트 → calibration_report.json 덤프
 ├── Procfile              # web: gunicorn app:app --workers 1
 ├── requirements.txt
 ├── templates/
 │   ├── base.html         # 공통 레이아웃 + Twemoji
-│   ├── index.html        # 사이드바 + 오늘 경기 카드
-│   └── match.html        # PRE/POST 분석 리포트
+│   ├── index.html        # 사이드바 + 오늘 경기 카드 + Evaluation 링크
+│   ├── match.html        # PRE/POST 분석 리포트
+│   └── methodology.html  # /methodology 평가·캘리브레이션 페이지 (calibration_report.json 렌더)
 ├── static/
 │   ├── style.css         # MATCHIQ 다크 테마 (IBM Plex Mono)
 │   ├── charts.js         # Chart.js + SSE 클라이언트 (LIVE용)
+│   ├── calibration_report.json  # 백테스트 산출 아티팩트(= /methodology 진실원). 재생성:
+│   │                            #   INTL_RESULTS_CSV=<results.csv> python backtest_calibration.py --dump
 │   ├── screenshot_prematch.png   # README용
 │   └── screenshot_postmatch.png  # README용
 ├── README.md             # MATCHIQ 공개 문서 (방법론/아키텍처)

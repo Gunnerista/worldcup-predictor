@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="methodology">
+
+    <a class="back" href="/">← All fixtures</a>
+
+    {% if not report %}
+    <section class="m-section">
+        <h1>Model evaluation &amp; calibration</h1>
+        <p class="muted">Evaluation data is currently unavailable. Regenerate
+        <code>static/calibration_report.json</code> with the backtest and redeploy.</p>
+    </section>
+    {% else %}
+
+    <!-- 1. Title -->
+    <header class="eval-head">
+        <h1>Model evaluation &amp; calibration</h1>
+        <p class="eval-sub">Dixon-Coles + ρ (MLE) + ELO/strength λ, temperature-calibrated.</p>
+    </header>
+
+    <!-- 2. Trust anchor -->
+    <div class="anchor-callout">
+        <span class="anchor-badge">Leakage-free</span>
+        As-of backtest over <b>{{ report.meta.n_eval_full }}</b> recent international
+        matches (2025–2026). Every prediction uses <b>only data prior to that match</b>.
+    </div>
+
+    <!-- 3. Hero: reliability curve -->
+    <section class="m-section">
+        <h2>Reliability — before vs after calibration</h2>
+        <div class="chart-wrap">
+            <svg viewBox="0 0 360 360" width="100%" height="auto"
+                 preserveAspectRatio="xMidYMid meet" class="reliability-svg" role="img"
+                 aria-label="Reliability diagram: predicted vs observed probability">
+                <!-- plot frame -->
+                <rect x="{{ curve.ml }}" y="{{ curve.mt }}" width="{{ curve.size }}"
+                      height="{{ curve.size }}" fill="none" stroke="#1a2035"/>
+                <!-- gridlines + ticks -->
+                {% for t in curve.xticks %}
+                <line x1="{{ t.x }}" y1="{{ curve.mt }}" x2="{{ t.x }}" y2="{{ curve.y0 }}"
+                      stroke="#141a2b"/>
+                <text x="{{ t.x }}" y="{{ curve.y0 + 16 }}" class="ax">{{ t.label }}</text>
+                {% endfor %}
+                {% for t in curve.yticks %}
+                <text x="{{ curve.ml - 6 }}" y="{{ t.y + 4 }}" class="ax ay">{{ t.label }}</text>
+                {% endfor %}
+                <!-- perfect-calibration diagonal -->
+                <line x1="{{ curve.diag.x1 }}" y1="{{ curve.diag.y1 }}"
+                      x2="{{ curve.diag.x2 }}" y2="{{ curve.diag.y2 }}"
+                      stroke="#4a5568" stroke-dasharray="4 4"/>
+                <!-- raw (overconfident) -->
+                <polyline points="{{ curve.raw.poly }}" fill="none" stroke="#EF9F27"
+                          stroke-width="2" stroke-dasharray="5 4"/>
+                {% for d in curve.raw.dots %}
+                <circle cx="{{ d.cx }}" cy="{{ d.cy }}" r="{{ d.r }}" fill="#EF9F27" opacity="0.85"/>
+                {% endfor %}
+                <!-- calibrated -->
+                <polyline points="{{ curve.cal.poly }}" fill="none" stroke="#1D9E75"
+                          stroke-width="2"/>
+                {% for d in curve.cal.dots %}
+                <circle cx="{{ d.cx }}" cy="{{ d.cy }}" r="{{ d.r }}" fill="#1D9E75" opacity="0.9"/>
+                {% endfor %}
+                <text x="{{ curve.ml + 6 }}" y="{{ curve.mt + 14 }}" class="ax">observed →</text>
+                <text x="{{ curve.y0 - 4 }}" y="{{ curve.y0 + 30 }}" class="ax">predicted →</text>
+            </svg>
+            <ul class="legend">
+                <li><span class="sw" style="background:#EF9F27"></span> Raw (overconfident)</li>
+                <li><span class="sw" style="background:#1D9E75"></span> Calibrated (T={{ report.meta.production_T }})</li>
+                <li><span class="sw dash"></span> Perfect calibration</li>
+            </ul>
+        </div>
+        <p class="caption">Curve = full corpus (n={{ report.hero.n }}). Metrics table below =
+        leakage-free held-out test (n={{ report.test_table.n }}). Dot size ∝ bin sample count.</p>
+    </section>
+
+    <!-- 4. Metrics table (held-out test) -->
+    <section class="m-section">
+        <h2>Held-out test metrics <span class="muted">(n={{ report.test_table.n }})</span></h2>
+        <div class="table-scroll">
+            <table class="eval-table">
+                <thead>
+                    <tr><th>Metric</th><th>Raw</th><th>Calibrated</th><th>Base-rate</th></tr>
+                </thead>
+                <tbody>
+                    {% set tt = report.test_table %}
+                    <tr><td>RPS <span class="muted">↓</span></td>
+                        <td>{{ '%.4f'|format(tt.raw.rps) }}</td>
+                        <td class="best">{{ '%.4f'|format(tt.calibrated.rps) }}</td>
+                        <td>{{ '%.4f'|format(tt.base_rate.rps) }}</td></tr>
+                    <tr><td>Brier <span class="muted">↓</span></td>
+                        <td>{{ '%.4f'|format(tt.raw.brier) }}</td>
+                        <td class="best">{{ '%.4f'|format(tt.calibrated.brier) }}</td>
+                        <td>{{ '%.4f'|format(tt.base_rate.brier) }}</td></tr>
+                    <tr><td>Log-loss <span class="muted">↓</span></td>
+                        <td>{{ '%.4f'|format(tt.raw.logloss) }}</td>
+                        <td class="best">{{ '%.4f'|format(tt.calibrated.logloss) }}</td>
+                        <td>{{ '%.4f'|format(tt.base_rate.logloss) }}</td></tr>
+                    <tr><td>ECE <span class="muted">↓</span></td>
+                        <td>{{ '%.4f'|format(tt.raw.ece) }}</td>
+                        <td class="best">{{ '%.4f'|format(tt.calibrated.ece) }}</td>
+                        <td>{{ '%.4f'|format(tt.base_rate.ece) }}<span class="muted">*</span></td></tr>
+                </tbody>
+            </table>
+        </div>
+        <p class="caption">Lower is better. Calibrated beats the base-rate (climatology)
+        on every proper score. <span class="muted">*Base-rate ECE is 0 by construction
+        (a constant prediction is trivially calibrated but has no discrimination).</span></p>
+    </section>
+
+    <!-- 5. Metric cards -->
+    <section class="m-section">
+        <div class="metric-cards">
+            <div class="metric-card">
+                <div class="mc-label">Calibration error (ECE)</div>
+                <div class="mc-value">{{ '%.4f'|format(report.cards.ece_raw) }}
+                    <span class="mc-arrow">→</span>
+                    <b class="good">{{ '%.4f'|format(report.cards.ece_cal) }}</b></div>
+                <div class="mc-foot">held-out test</div>
+            </div>
+            <div class="metric-card">
+                <div class="mc-label">RPS vs base-rate</div>
+                <div class="mc-value"><b class="good">{{ '%.3f'|format(report.cards.rps_cal) }}</b>
+                    <span class="muted">/ {{ '%.3f'|format(report.cards.rps_base) }}</span></div>
+                <div class="mc-foot">beats climatology</div>
+            </div>
+            <div class="metric-card">
+                <div class="mc-label">Backtest size</div>
+                <div class="mc-value"><b>{{ report.cards.backtest_n }}</b></div>
+                <div class="mc-foot">leakage-free as-of</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 6. Limitations -->
+    <section class="m-section">
+        <h2>Limitations <span class="muted">(read honestly)</span></h2>
+        {% set lim = report.limitations %}
+        <ul class="limitations">
+            <li><b>Corpus mix.</b> Friendlies are {{ lim.friendly_share_full_pct }}% of the
+                full eval set and {{ lim.friendly_share_test_pct }}% of the held-out test —
+                results lean toward friendly-match behaviour.</li>
+            <li><b>No Nations League in eval.</b>
+                {% if not lim.nl_in_eval %}UEFA Nations League fixtures fell in the warm-up
+                window, so they are not scored here.{% else %}Present.{% endif %}</li>
+            <li><b>Small test set.</b> Held-out test is n={{ lim.test_n }}; high-confidence
+                reliability bins are sparse, so ECE there carries noise.</li>
+            <li><b>Residual away-favourite overconfidence.</b> After a single temperature,
+                away picks ≥60% (n={{ lim.away_residual.n }}) still ran
+                {{ '%.0f'|format(lim.away_residual.pred * 100) }}% predicted vs
+                {{ '%.0f'|format(lim.away_residual.obs * 100) }}% observed
+                (gap {{ '%+.0f'|format(lim.away_residual.gap * 100) }}pp). Signal for richer
+                calibration — <b>not acted on</b> (sample too small).</li>
+            <li><b>Engine scope.</b> This validates the core engine only. The live-only stages
+                ({{ lim.unvalidated_stages | join(', ') }}) are <b>not covered</b> by this fit.</li>
+        </ul>
+    </section>
+
+    <!-- 7. Live forward track -->
+    <section class="m-section">
+        <h2>Live forward track</h2>
+        <p class="narrative">Predictions are <b>locked before kickoff</b> (saved up to two
+        hours ahead, never revised) and scored <b>prospectively</b> as matches complete.
+        Forward tracking of the calibrated model begins at the cutover
+        ({{ report.meta.generated_at[:10] }}); results will populate as matches finish.
+        The live sample is currently minimal and is reported honestly — no headline
+        accuracy figure is claimed until the sample is meaningful.</p>
+    </section>
+
+    <!-- provenance footer -->
+    <footer class="eval-foot">
+        Generated from backtest at <code>{{ report.meta.git_commit }}</code>,
+        {{ report.meta.generated_at[:10] }} · data: {{ report.meta.data_source }}.<br>
+        Reproduce: <code>{{ report.meta.reproduce }}</code>
+    </footer>
+
+    {% endif %}
+</div>
+{% endblock %}

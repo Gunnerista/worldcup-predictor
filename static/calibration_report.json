@@ -1,0 +1,155 @@
+{
+  "meta": {
+    "data_source": "github.com/martj42/international_results (CC0)",
+    "source_script": "backtest_calibration.py",
+    "generated_at": "2026-06-17T03:17:08+00:00",
+    "git_commit": "ddac4a8",
+    "reproduce": "INTL_RESULTS_CSV=<results.csv> python backtest_calibration.py --dump",
+    "n_corpus": 616,
+    "n_warmup": 177,
+    "n_eval_full": 439,
+    "n_train": 286,
+    "n_test": 102,
+    "n_dropped": 51,
+    "production_T": 1.718,
+    "rho": -0.1514,
+    "home_advantage": 1.1,
+    "max_goals": 6
+  },
+  "hero": {
+    "n": 439,
+    "raw": [
+      {
+        "pred": 0.0532,
+        "obs": 0.1402,
+        "n": 328
+      },
+      {
+        "pred": 0.153,
+        "obs": 0.2407,
+        "n": 295
+      },
+      {
+        "pred": 0.2459,
+        "obs": 0.2356,
+        "n": 174
+      },
+      {
+        "pred": 0.3464,
+        "obs": 0.3226,
+        "n": 93
+      },
+      {
+        "pred": 0.4435,
+        "obs": 0.4032,
+        "n": 62
+      },
+      {
+        "pred": 0.5505,
+        "obs": 0.4559,
+        "n": 68
+      },
+      {
+        "pred": 0.6511,
+        "obs": 0.5741,
+        "n": 54
+      },
+      {
+        "pred": 0.7535,
+        "obs": 0.5952,
+        "n": 84
+      },
+      {
+        "pred": 0.868,
+        "obs": 0.717,
+        "n": 159
+      }
+    ],
+    "calibrated": [
+      {
+        "pred": 0.0755,
+        "obs": 0.072,
+        "n": 125
+      },
+      {
+        "pred": 0.1638,
+        "obs": 0.1818,
+        "n": 220
+      },
+      {
+        "pred": 0.2464,
+        "obs": 0.2317,
+        "n": 397
+      },
+      {
+        "pred": 0.3427,
+        "obs": 0.3207,
+        "n": 184
+      },
+      {
+        "pred": 0.4539,
+        "obs": 0.4679,
+        "n": 109
+      },
+      {
+        "pred": 0.5566,
+        "obs": 0.6024,
+        "n": 83
+      },
+      {
+        "pred": 0.6456,
+        "obs": 0.5758,
+        "n": 99
+      },
+      {
+        "pred": 0.7307,
+        "obs": 0.81,
+        "n": 100
+      }
+    ]
+  },
+  "test_table": {
+    "n": 102,
+    "raw": {
+      "rps": 0.2177,
+      "brier": 0.6406,
+      "logloss": 1.0824,
+      "ece": 0.103
+    },
+    "calibrated": {
+      "rps": 0.2023,
+      "brier": 0.6012,
+      "logloss": 1.0022,
+      "ece": 0.0265
+    },
+    "base_rate": {
+      "rps": 0.215,
+      "brier": 0.6246,
+      "logloss": 1.0389,
+      "ece": 0.0
+    }
+  },
+  "cards": {
+    "ece_raw": 0.103,
+    "ece_cal": 0.0265,
+    "rps_cal": 0.2023,
+    "rps_base": 0.215,
+    "backtest_n": 439
+  },
+  "limitations": {
+    "friendly_share_full_pct": 41.7,
+    "friendly_share_test_pct": 66.7,
+    "nl_in_eval": false,
+    "test_n": 102,
+    "away_residual": {
+      "n": 7,
+      "pred": 0.659,
+      "obs": 0.429,
+      "gap": 0.23
+    },
+    "unvalidated_stages": [
+      "player_xG_adj",
+      "situation_mult"
+    ]
+  }
+}
