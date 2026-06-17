@@ -17,6 +17,7 @@ percentage, similarity, motivation, or impact score.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import threading
@@ -458,6 +459,32 @@ def _est_label(iso):
     return dt.tzname() if dt else "EST"
 
 
+# ---------------------------------------------------------------------------
+# Post-hoc calibration — temperature scaling of the engine's W/D/L distribution.
+# T fitted by golden-section NLL minimisation on 439 recent international matches
+# (2025-07..2026-05); see backtest_calibration.py. On that set, full-fit T=1.718
+# improved ECE 0.083 -> 0.026 and RPS 0.194 -> 0.185 (the engine was overconfident
+# at the tails). T>1 flattens the distribution. The transform is monotonic, so it
+# is ARGMAX-PRESERVING: predicted_outcome and SEASON RECORD are unchanged — only
+# the confidence magnitude softens. NOTE: validated only for the core engine path;
+# the live-only stages (player_xG_adj, situation_mult) are not covered by this fit.
+CALIBRATION_T = 1.718
+CALIBRATION_VERSION = "v1+tcal"   # predictions.model_version cutover marker
+
+
+def calibrate_wdl(p_home, p_draw, p_away):
+    """Temperature-scale a W/D/L percentage triple (0-100) via softmax(log(p)/T).
+    Returns a calibrated triple (0-100, sums to 100). Order preserved (argmax
+    invariant). Inputs may be percentages or fractions — softmax cancels the
+    log-scale constant either way."""
+    z = [math.log(max(float(p), 1e-9)) / CALIBRATION_T
+         for p in (p_home, p_draw, p_away)]
+    m = max(z)
+    e = [math.exp(zi - m) for zi in z]
+    s = sum(e)
+    return tuple(100.0 * ei / s for ei in e)
+
+
 def generate_prediction_label(b) -> dict:
     """Layer B: pure argmax labeling. The most likely W/D/L outcome IS the
     prediction — no market baseline, no asymmetric thresholds.
@@ -568,6 +595,10 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             top_n=10,
         )
         wdl = pred["win_draw_loss"]
+        # Temperature-calibrate the W/D/L distribution before display/labeling
+        # (argmax-preserving; see calibrate_wdl). Applied to the live-compute path
+        # only — POST snapshots read stored values verbatim.
+        cwh, cwd, cwa = calibrate_wdl(wdl["home_win"], wdl["draw"], wdl["away_win"])
         eg = pred["expected_goals"]
         mtx = pred["matrix"]
 
@@ -618,9 +649,9 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             "code2":     _team_code(t2),
             "ctx_line":  ctx_line,
             "elo_diff":  round(elo1 - elo2),
-            "p1":        round(wdl["home_win"]),
-            "pdraw":     round(wdl["draw"]),
-            "p2":        round(wdl["away_win"]),
+            "p1":        round(cwh),
+            "pdraw":     round(cwd),
+            "p2":        round(cwa),
             "eg1":       eg["home"],
             "eg2":       eg["away"],
             "rho":       dc.RHO,
@@ -845,12 +876,15 @@ def index():
                 group_name=grp or None,
             )
             wdl = pred["win_draw_loss"]
+            # Calibrate W/D/L for the index cards too, so the homepage and the
+            # match-detail PRE page show the same numbers (argmax-preserving).
+            cwh, cwd, cwa = calibrate_wdl(wdl["home_win"], wdl["draw"], wdl["away_win"])
             eg = pred["expected_goals"]
             note = ((pred.get("situation") or {}).get("home") or {}).get("note")
             today_cards.append({
                 "id": r["id"], "team1": t1, "team2": t2,
                 "flag1": _flag(t1), "flag2": _flag(t2),
-                "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]), "p2": round(wdl["away_win"]),
+                "p1": round(cwh), "pdraw": round(cwd), "p2": round(cwa),
                 "xg1": eg["home"], "xg2": eg["away"], "note": note,
                 "group": (grp or "").upper(),
                 "time": _est_time(k),
@@ -1021,14 +1055,18 @@ def _run_due_predictions() -> int:
             )
             wdl = pred["win_draw_loss"]
             eg = pred["expected_goals"]
+            # Calibrate before labeling AND before persisting, so the stored
+            # snapshot is the calibrated distribution. model_version marks the
+            # cutover; pre-cutover rows ("v1"/"manual") are never converted.
+            cwh, cwd, cwa = calibrate_wdl(wdl["home_win"], wdl["draw"], wdl["away_win"])
             label = generate_prediction_label({
                 "team1": home, "team2": away,
-                "p1": round(wdl["home_win"]), "pdraw": round(wdl["draw"]),
-                "p2": round(wdl["away_win"]),
+                "p1": round(cwh), "pdraw": round(cwd),
+                "p2": round(cwa),
                 "eg1": eg["home"], "eg2": eg["away"],
             })
-            save_prediction(r["id"], wdl["home_win"], wdl["draw"], wdl["away_win"],
-                            model_version="v1", conn=conn,
+            save_prediction(r["id"], cwh, cwd, cwa,
+                            model_version=CALIBRATION_VERSION, conn=conn,
                             suggested_bet=label["suggested_bet"],
                             draw_edge=None, total_xg=label["total_xg"],
                             predicted_outcome=label["predicted_outcome"],
