@@ -3,7 +3,7 @@
 이 파일은 프로젝트 단일 진실 공급원(SSoT). 컨텍스트가 꽉 차서 새 세션을 열어도, 이 문서만 읽으면 그대로 이어갈 수 있어야 함.
 
 > **새 세션 필독:** §11 함정(Gotchas) 먼저 읽어. 같은 함정에 두 번 빠지지 마.
-> **최종 갱신:** 2026-06-16 (**Layer B = 순수 argmax 라벨링** — 비대칭 문턱·26% baseline 제거 / Eastern DST 전환 / "No prediction recorded" / POST 스냅샷-only odds)
+> **최종 갱신:** 2026-06-17 (**temperature 캘리브레이션 T=1.718** + **/methodology 평가 페이지** / Layer B argmax / 파이프라인 라이브 검증)
 
 ---
 
@@ -35,8 +35,19 @@
 - **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
 - **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, **Eastern(DST 자동) 시간**.
 
-### 3.1 마지막 세션 인수인계 (2026-06-16 — Layer B argmax)
-**이번 세션 (Layer B 의사결정 규칙 교체):**
+### 3.1 마지막 세션 인수인계 (2026-06-17 — calibration + /methodology)
+**이번 세션 (temperature 캘리브레이션 + 평가 페이지 + 파이프라인 검증):**
+- **Temperature 캘리브레이션 (argmax 보존).** 코어 엔진(DC+ρ+ELO/strength)이 꼬리에서 과신 → 단일 `T=1.718`로 W/D/L 분포 평탄화. **`app.py calibrate_wdl(p_home,p_draw,p_away)` = softmax(log(p)/T)**, 0–100 triple 반환, **단조변환이라 argmax(predicted_outcome·SEASON RECORD) 불변, confidence(%)만 완만**(검증 528/528). 삽입 **3곳(라이브 compute만)**: `_build_pre_match_bundle`(match PRE), `index()` today-cards, `_run_due_predictions`(저장). **POST 스냅샷 경로는 미삽입**(저장값 verbatim, 소급 변환 없음). 신규 저장 `model_version="v1+tcal"`(컷오버 마커, 과거 v1/manual 무변경, 스키마 변경 없음).
+- **T 산출:** 누수 없는 as-of 백테스트(`backtest_calibration.py`, martj42/international_results CC0, 439경기 2025-07~2026-05) → golden-section NLL(scipy 금지). full-set ECE 0.083→0.026, RPS 0.194→0.185. held-out test(n=102): ECE 0.103→0.027, RPS 0.202 vs base-rate 0.215(climatology 이김). away-favorite 잔여 과신(n=7, gap+0.23) = richer calibration 신호, **미적용**.
+- **`/methodology` 평가 페이지** (네비 "Evaluation" 링크). 숫자 전부 `static/calibration_report.json`(백테스트 `--dump` 산출 아티팩트)에서 렌더, **하드코딩 0**. reliability 곡선 = **서버사이드 인라인 SVG**(CDN/JS 의존 없음, viewBox 모바일). 히어로 곡선=전체 439, 지표표=held-out 102(캡션 명시). 정직성 가드: SOTA(0.206) 비교 없음, skill=climatology 우위까지만, 라이브 "X% 적중" 헤드라인 없음, 미검증 2단계(player_xG_adj·situation_mult) 명기.
+- **파이프라인 라이브 검증(읽기):** 지난 세션 predictions 2건(14,15) → 현재 **6건(14–19, 자동저장)**, SEASON RECORD **4/6**. match 16–19가 예정→예측저장→완료→POST 채점까지 진행 = 백그라운드 sync(`sync_live_lite`+`_run_due_predictions`) 실행 증거. (직접 heartbeat/created_at·2h·model_version 확인은 Railway 로그/`DATABASE_URL` 필요 — HTTP로는 미관찰.)
+- **커밋(전부 push+Railway 배포 검증됨):** `ddac4a8`(temperature calibration), `2b18097`(/methodology page). 라이브 `/`·`/methodology` 200, PRE match 20(Austria/Jordan) raw 46/33/21 → **calibrated 41/33/26** 표시 확인.
+- **미추적 임시:** `verify_layerb.py`(Layer B 검증), `backtest_calibration.py`는 **이번에 커밋됨**(재현성, CSV 경로 인자화).
+- **다음:** away-favorite richer calibration(보류), README 스크린샷 재촬영, LIVE 실시간 푸시, Monte Carlo 진출 시뮬.
+
+---
+
+**이전 세션 (2026-06-16 — Layer B argmax 라벨링):**
 - **Layer B = 순수 argmax 라벨링.** 라벨 = `argmax(p_home, p_draw, p_away)` (최빈 결과 = 예측). **하드코딩 26% draw baseline + 비대칭 문턱(draw>5 / win>55) 전부 제거.** 신뢰도 = 최빈 확률값, `is_tossup` = 상위 2개 확률 차 < 5pp(=0.05, 대칭 플래그). 전체 분포는 계속 계산·저장·표시.
 - **개명:** `app.py generate_model_edge` → **`generate_prediction_label`**, 번들 키 `b["model_edge"]` → **`b["prediction"]`**. `_season_record`도 argmax 한 줄로. POST `predicted_winner`는 **저장 분포 스냅샷의 argmax**로 결정(legacy `suggested_bet` 문자열 파싱 제거 — 구 draw 편향 프레이밍 재유입 차단).
 - **새 컬럼 3개 (비파괴 ADD):** predictions에 `predicted_outcome TEXT`/`confidence REAL`/`is_tossup INTEGER(0/1)`. `database.py` 스키마 + `_ensure_prediction_edge_columns()` idempotent ALTER. **`draw_edge`/`suggested_bet` 컬럼 보존**(DROP 금지), 단 `draw_edge`는 신규 예측 시 **NULL** 저장(26 baseline 제거). `save_prediction`에 파라미터 3개 추가.
@@ -54,9 +65,9 @@
 3. **POST "Pre-Match Odds"는 스냅샷-only** — 저장된 예측 없으면 상단 확률 바 자체를 렌더 안 함(완료 경기의 오염된 ELO 재계산값 표시 금지). `app.py` no-snapshot 분기에서 `p1/pdraw/p2=None` + 템플릿 `{% if phase != 'post' or bundle.has_prediction %}`.
 4. **Railway PG 예측 수동 INSERT** — match 14(Belgium vs Egypt, 실제 1-1) 예측을 운영자 요청으로 직접 INSERT: `home/draw/away_pct=32/48/19`(0–100 스케일), `created_at='2026-06-15 15:00:00'`(UTC=11:00 EDT), `model_version='manual'`, `suggested_bet='DRAW — 22pp above market average'`, `draw_edge=22.0`, `total_xg=NULL`. → POST에서 **✓ CORRECT**, SEASON RECORD 1/1.
 
-**Railway predictions 현재 상태:** 완료+예측 경기 **5건**(verify_layerb.py 기준 n=5). match 14(Belgium/Egypt, manual), match 15(Saudi/Uruguay) 포함. 신규 컬럼(predicted_outcome/confidence/is_tossup)은 `init_db` ALTER로 추가되며, 기존 5건은 분포 컬럼이 있어 argmax 표시는 즉시 정상(백필 불필요). **로컬 SQLite는 0건(clean).**
+**Railway predictions 현재 상태 (2026-06-17):** **6건** — match 14(manual), 15–19(자동저장). SEASON RECORD **4/6 CORRECT**. match 1–13은 파이프라인 활성화 이전 완료라 "No prediction recorded". 신규 자동저장은 `v1+tcal`(캘리브레이션 컷오버 이후). **로컬 SQLite는 0건(clean).**
 
-**커밋:** `d0e69a1`(Layer B argmax, **push 보류**), `63455fd`(No prediction recorded + Eastern DST, 배포됨), `fc359f8`(POST 스냅샷-only odds, 배포됨).
+**커밋 (전부 push+배포됨):** `2b18097`(/methodology page), `ddac4a8`(temperature calibration T=1.718), `1633869`(docs Layer B), `d0e69a1`(Layer B argmax), `63455fd`(No prediction recorded + Eastern DST), `fc359f8`(POST 스냅샷-only odds).
 
 **⚠️ 남은 일:**
 - **DATABASE_URL은 이 dev 환경에 자동 주입 안 됨** — Bash 툴에 인라인(`DATABASE_URL="postgresql://..." python ...`)으로 넘겨야 Railway PG 접근. (운영자가 PowerShell `$env:`로 세팅해도 Bash 서브프로세스엔 전파 안 됨.)
@@ -131,6 +142,7 @@
 - app.py `_build_live_elo_2026()`가 시드 baseline + build_2026_elo 결과 overlay.
 
 ### 6.3 예측 추적 (`model.py` + `app.py`)
+- **★ Temperature 캘리브레이션 (후처리, argmax 보존).** 엔진이 W/D/L 분포를 뱉은 **직후** `app.py calibrate_wdl(h,d,a)` = `softmax(log(p)/CALIBRATION_T)`, `CALIBRATION_T=1.718`. 라이브 compute 3곳(PRE 렌더·index 카드·저장)에 적용, **POST 스냅샷 경로는 제외**(저장값 verbatim). 단조라 argmax 불변(confidence만 완만). 신규 저장 `model_version="v1+tcal"`. T 출처·근거 = `backtest_calibration.py` → `static/calibration_report.json`. **§11.9 참고.**
 - **`save_prediction()`** — predictions에 킥오프 전 예측 저장. **분포 + Layer B 라벨 스냅샷 저장**: `home/draw/away_win_pct` + `predicted_outcome`/`confidence`/`is_tossup` + `suggested_bet`(표시용 라벨 문자열)/`total_xg`. `draw_edge`는 컬럼 보존하되 신규 저장 시 **NULL**(26 baseline 제거). database.py `_ensure_prediction_edge_columns()`가 init_db에서 idempotent ALTER — 기존 DB도 자동 추가(6개 컬럼).
 - **`compute_brier_score(season=2026)`** — 완료+예측 경기 멀티클래스 Brier `Σ(p−o)²`.
 - **predicted_winner = 순수 argmax (Layer B).** `argmax(p_home, p_draw, p_away)` — 최빈 결과가 곧 예측. **비대칭 문턱·26% baseline 없음.** 신뢰도 = 최빈 확률, `is_tossup` = 상위 2개 차 < 5pp(=0.05, 대칭). 라벨 산출 = `app.py generate_prediction_label()`(번들 키 `b["prediction"]`). POST는 **저장 분포 스냅샷의 argmax**로 결정(legacy `suggested_bet` 문자열 파싱 안 함 — 구 draw 편향 차단). `_season_record()`도 argmax라 결과 수렴.
@@ -154,6 +166,12 @@
 - **확률 바:** team1/draw/team2 (인라인 width+background, `<div>` 블록 — §11.7).
 - **PRE:** Pre-Match Analysis(영어 내러티브) + 수학블록(λ/μ/ρ/P(0-0)…) + **Model Prediction**(argmax 라벨 + 신뢰도 + toss-up 칩 + 중립 xG합) + Scoreline TOP5(결과별 색) + Team Strength.
 - **POST:** Prediction vs Result + 예측 적중 ✓/✗ + Brier + **SEASON RECORD** + **구조화 Post-Match Review**(got_right/missed/key_factors) + Scoreline + Team Strength.
+
+### `/methodology` (methodology.html) — 평가·캘리브레이션 페이지
+- 네비 = index 사이드바 `.brand` 아래 "Evaluation →" 링크. 페이지 상단 `← All fixtures`.
+- **숫자 전부 `static/calibration_report.json`에서 렌더 (하드코딩 0).** 라우트 `methodology()`가 JSON load → `_build_reliability_svg(hero)`로 SVG 좌표 계산 → 템플릿. JSON 없으면 graceful notice(500 없음).
+- 콘텐츠: 제목+서브 / 신뢰 앵커(누수 없는 439) / **히어로 reliability SVG**(raw vs calibrated + 45°, 서버사이드 인라인 SVG·viewBox 모바일) / held-out test 지표표 / 메트릭 카드 3 / 한계(정직) / forward track placeholder / provenance footer(generated_at+git_commit+reproduce).
+- **재현:** `INTL_RESULTS_CSV=<results.csv> python backtest_calibration.py --dump` → JSON 재커밋. **Railway엔 CSV 없어 재계산 불가 → JSON 아티팩트가 진실원** (§11.9).
 
 ### `/api/brier`
 `compute_brier_score` 결과 JSON `{brier_score, n_matches}`. match.html이 fetch.
@@ -277,6 +295,12 @@ FLASK_DEBUG=True
 - **PG `AVG(정수컬럼)`은 `decimal.Decimal` 반환** → `Decimal * float` TypeError. (SQLite는 float라 로컬선 멀쩡 → 디버깅 함정)
 - **DB에서 가져온 숫자는 전부 `float()` 캐스팅.** `_team_strengths_from_db`, `_player_xg_adjustment`, `predict_from_db`의 ha/hd/aa/ad 등에 적용됨. 새 DB 쿼리 추가 시 항상 float() 래핑.
 
+### 11.9 Temperature 캘리브레이션 + 평가 아티팩트
+- **`calibrate_wdl`은 라이브 compute 3곳에만, POST 스냅샷 경로엔 절대 적용 금지** — 과거 저장 예측 소급 변환되면 안 됨(컷오버 = `model_version="v1+tcal"`). 새 W/D/L 노출 경로 추가 시 calibrate 적용 + 스냅샷 경로 제외 일관성 유지.
+- **단조변환이라 argmax 보존** — 캘리브레이션 바꿔도 predicted_outcome·SEASON RECORD 불변이어야 정상. 바뀌면 버그(중단).
+- **`static/calibration_report.json`이 /methodology의 진실원.** Railway엔 `results.csv`(martj42, 로컬 temp) 없어 **백테스트 재계산 불가** → JSON을 로컬에서 `--dump`로 만들어 **커밋**해야 라이브 반영. 코드/JSON 어긋남 방지 위해 meta에 `git_commit`/`generated_at` 박힘(페이지 footer 노출).
+- **`backtest_calibration.py`는 라이브 엔진 `DixonColesEngine.predict()` 재사용**(새 엔진 X). 입력(strength/ELO)만 as-of international로 교체. `player_xG_adj`/`situation_mult`는 2026 전용이라 백테스트 미검증(페이지에 명기). scipy 금지 — golden-section.
+
 ---
 
 ## 12. 진행 상태
@@ -292,6 +316,8 @@ FLASK_DEBUG=True
 - [x] **MATCHIQ 리브랜드** (영어 UI, 사이드바, PRE/POST, 국기, EST, MODEL EDGE, 구조화 리뷰)
 - [x] **edge 스냅샷** (predictions에 suggested_bet/draw_edge/total_xg) + POST "Pre-Match Odds/Signal" — **이후 Layer B에서 predicted_winner를 순수 argmax로 교체(`d0e69a1`), 26% baseline·비대칭 문턱 제거. draw_edge는 신규 NULL.**
 - [x] **Layer B argmax 라벨링** (`d0e69a1`) — `generate_prediction_label`, `b["prediction"]`, 새 컬럼 predicted_outcome/confidence/is_tossup(비파괴 ADD), 중립 xG 표시. 검증 OLD 2/5→argmax 3/5.
+- [x] **Temperature 캘리브레이션 T=1.718** (`ddac4a8`) — `calibrate_wdl` 후처리 3곳, argmax 보존, `v1+tcal` 컷오버. 누수 없는 백테스트 검증(ECE 0.083→0.026). §11.9.
+- [x] **/methodology 평가 페이지** (`2b18097`) — `calibration_report.json` 기반 reliability SVG·지표표·한계, `backtest_calibration.py` 커밋(재현). 라이브 검증 완료.
 - [x] **"No prediction recorded"** — 스냅샷 없는 완료 경기는 가짜 적중 판정 안 함 (`63455fd`)
 - [x] **Eastern DST 자동** (`ZoneInfo America/New_York` + `tzdata` + 동적 라벨) — §11.6 결정 완료 (`63455fd`)
 - [x] **POST "Pre-Match Odds" 스냅샷-only** — 재계산값 표시 차단 (`fc359f8`)
@@ -300,8 +326,9 @@ FLASK_DEBUG=True
 
 미완 / 다음:
 - [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py`) — 또는 백그라운드 sync가 채우게 (운영자 확인 필요). teams 112/matches 104는 적재됨.
-- [ ] **SEASON RECORD** — Railway predictions 현재 2건(match 14 manual=CORRECT, match 15 auto/edge NULL). 로컬은 0건(clean). 앞으로 킥오프 전 자동저장(edge 포함)부터 채워짐.
-- [ ] **README 스크린샷 재촬영**(선택) — Eastern/odds 변경 반영.
+- [x] **SEASON RECORD 자동 채워짐** — Railway predictions 6건(14–19), 4/6 CORRECT. 백그라운드 sync가 킥오프 전 자동저장→완료 전환→채점 (라이브 검증됨).
+- [ ] **away-favorite richer calibration** — 단일 T 후 잔여 과신(n=7, gap+0.23). per-class/vector scaling 신호, 표본 더 모이면 검토(현재 미적용).
+- [ ] **README 스크린샷 재촬영**(선택) — Eastern/odds/calibration/methodology 반영.
 - [ ] LIVE phase 실시간 푸시 (현재 60s DB 폴링 + 백그라운드 sync)
 - [ ] Monte Carlo 토너먼트 진출 시뮬레이션 (3위 cross-group 컷 포함)
 - [ ] 모바일 QA + style.css 폴리시 (새 클래스 일부 CSS 없이 인라인만 적용된 곳 있음)
