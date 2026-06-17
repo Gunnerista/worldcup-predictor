@@ -3,7 +3,7 @@
 이 파일은 프로젝트 단일 진실 공급원(SSoT). 컨텍스트가 꽉 차서 새 세션을 열어도, 이 문서만 읽으면 그대로 이어갈 수 있어야 함.
 
 > **새 세션 필독:** §11 함정(Gotchas) 먼저 읽어. 같은 함정에 두 번 빠지지 마.
-> **최종 갱신:** 2026-06-16 (Eastern DST 전환 + "No prediction recorded" + POST 스냅샷-only odds + Railway 수동 예측 INSERT)
+> **최종 갱신:** 2026-06-16 (**Layer B = 순수 argmax 라벨링** — 비대칭 문턱·26% baseline 제거 / Eastern DST 전환 / "No prediction recorded" / POST 스냅샷-only odds)
 
 ---
 
@@ -35,16 +35,28 @@
 - **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
 - **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, **Eastern(DST 자동) 시간**.
 
-### 3.1 마지막 세션 인수인계 (2026-06-16)
-이번 세션에서 한 것:
+### 3.1 마지막 세션 인수인계 (2026-06-16 — Layer B argmax)
+**이번 세션 (Layer B 의사결정 규칙 교체):**
+- **Layer B = 순수 argmax 라벨링.** 라벨 = `argmax(p_home, p_draw, p_away)` (최빈 결과 = 예측). **하드코딩 26% draw baseline + 비대칭 문턱(draw>5 / win>55) 전부 제거.** 신뢰도 = 최빈 확률값, `is_tossup` = 상위 2개 확률 차 < 5pp(=0.05, 대칭 플래그). 전체 분포는 계속 계산·저장·표시.
+- **개명:** `app.py generate_model_edge` → **`generate_prediction_label`**, 번들 키 `b["model_edge"]` → **`b["prediction"]`**. `_season_record`도 argmax 한 줄로. POST `predicted_winner`는 **저장 분포 스냅샷의 argmax**로 결정(legacy `suggested_bet` 문자열 파싱 제거 — 구 draw 편향 프레이밍 재유입 차단).
+- **새 컬럼 3개 (비파괴 ADD):** predictions에 `predicted_outcome TEXT`/`confidence REAL`/`is_tossup INTEGER(0/1)`. `database.py` 스키마 + `_ensure_prediction_edge_columns()` idempotent ALTER. **`draw_edge`/`suggested_bet` 컬럼 보존**(DROP 금지), 단 `draw_edge`는 신규 예측 시 **NULL** 저장(26 baseline 제거). `save_prediction`에 파라미터 3개 추가.
+- **UI(match.html):** 'lean'/'bet' 프레이밍 제거 → 중립 통계 **"Expected total goals (xG sum): X.X"**. 라벨+신뢰도+toss-up 칩(PRE/POST). 섹션 제목 "Model Prediction"/"Pre-Match Prediction".
+- **PG Decimal→float:** POST에서 `pp1/ppd/pp2 = float(prow[...])` 캐스팅(§11.8).
+- **검증(Railway PG `railway run python verify_layerb.py`, SELECT-only):** OLD 규칙 **2/5** → argmax **3/5** (DELTA +1, 구 무승부 편향이 1경기 오판). flip(old=DRAW→argmax≠draw) **3건 중 2건 correct(France, Iraq — argmax 맞고 구 규칙 틀림), 1건 variance(Saudi/Uruguay)**. → 변경이 실효 있음 확인.
+- **커밋:** `d0e69a1`(Layer B: replace draw-biased threshold cascade with argmax labeling). **push 보류**(운영자 확인 후 배포). `verify_layerb.py`는 임시·미커밋.
+- **다음:** RPS 평가(우선순위 2), strength prior(우선순위 3). strength 엔진·2026 로직은 이번에 미변경.
+
+---
+
+**이전 세션 (2026-06-16):**
 1. **"No prediction recorded"** — POST-MATCH에서 predictions에 해당 match_id 행이 없으면 CORRECT/INCORRECT·Brier·구조화 리뷰를 **아예 안 만들고** "No prediction recorded" 표시. (이전엔 결과 후 재계산으로 가짜 적중 판정) — `app.py` `has_prediction = bool(prow)` 분기 + `match.html` `{% if bundle.has_prediction %}`.
 2. **Eastern DST 전환** — `EST = timezone(UTC-5)` 고정 → **`EASTERN = ZoneInfo("America/New_York")`**(DST 자동). 여름 EDT(UTC-4)/겨울 EST. 라벨은 `_est_label()`=`tzname()`로 동적("EST"/"EDT"), 하드코딩 "EST" 전부 제거. `requirements.txt`에 **`tzdata` 추가**(Windows zoneinfo 필수, Railware Linux도 안전). **§11.6 EST vs EDT 미결사안 → EDT(America/New_York)로 결정 완료.**
 3. **POST "Pre-Match Odds"는 스냅샷-only** — 저장된 예측 없으면 상단 확률 바 자체를 렌더 안 함(완료 경기의 오염된 ELO 재계산값 표시 금지). `app.py` no-snapshot 분기에서 `p1/pdraw/p2=None` + 템플릿 `{% if phase != 'post' or bundle.has_prediction %}`.
 4. **Railway PG 예측 수동 INSERT** — match 14(Belgium vs Egypt, 실제 1-1) 예측을 운영자 요청으로 직접 INSERT: `home/draw/away_pct=32/48/19`(0–100 스케일), `created_at='2026-06-15 15:00:00'`(UTC=11:00 EDT), `model_version='manual'`, `suggested_bet='DRAW — 22pp above market average'`, `draw_edge=22.0`, `total_xg=NULL`. → POST에서 **✓ CORRECT**, SEASON RECORD 1/1.
 
-**Railway predictions 현재 상태 (2건):** match 14(manual, 위), match 15(Saudi vs Uruguay, 백그라운드 자동저장 — edge 컬럼 NULL, edge 기능 배포 이전 저장본). **로컬 SQLite는 0건(clean).**
+**Railway predictions 현재 상태:** 완료+예측 경기 **5건**(verify_layerb.py 기준 n=5). match 14(Belgium/Egypt, manual), match 15(Saudi/Uruguay) 포함. 신규 컬럼(predicted_outcome/confidence/is_tossup)은 `init_db` ALTER로 추가되며, 기존 5건은 분포 컬럼이 있어 argmax 표시는 즉시 정상(백필 불필요). **로컬 SQLite는 0건(clean).**
 
-**커밋:** `63455fd`(No prediction recorded + Eastern DST), `fc359f8`(POST 스냅샷-only odds). 둘 다 push+Railway 배포됨.
+**커밋:** `d0e69a1`(Layer B argmax, **push 보류**), `63455fd`(No prediction recorded + Eastern DST, 배포됨), `fc359f8`(POST 스냅샷-only odds, 배포됨).
 
 **⚠️ 남은 일:**
 - **DATABASE_URL은 이 dev 환경에 자동 주입 안 됨** — Bash 툴에 인라인(`DATABASE_URL="postgresql://..." python ...`)으로 넘겨야 Railway PG 접근. (운영자가 PowerShell `$env:`로 세팅해도 Bash 서브프로세스엔 전파 안 됨.)
@@ -119,10 +131,10 @@
 - app.py `_build_live_elo_2026()`가 시드 baseline + build_2026_elo 결과 overlay.
 
 ### 6.3 예측 추적 (`model.py` + `app.py`)
-- **`save_prediction()`** — predictions에 킥오프 전 예측 저장. **edge 스냅샷도 저장**: `suggested_bet`/`draw_edge`/`total_xg` 컬럼 (database.py `_ensure_prediction_edge_columns()`가 init_db에서 idempotent ALTER — 기존 DB도 자동 추가).
+- **`save_prediction()`** — predictions에 킥오프 전 예측 저장. **분포 + Layer B 라벨 스냅샷 저장**: `home/draw/away_win_pct` + `predicted_outcome`/`confidence`/`is_tossup` + `suggested_bet`(표시용 라벨 문자열)/`total_xg`. `draw_edge`는 컬럼 보존하되 신규 저장 시 **NULL**(26 baseline 제거). database.py `_ensure_prediction_edge_columns()`가 init_db에서 idempotent ALTER — 기존 DB도 자동 추가(6개 컬럼).
 - **`compute_brier_score(season=2026)`** — 완료+예측 경기 멀티클래스 Brier `Σ(p−o)²`.
-- **predicted_winner는 MODEL EDGE 규칙으로 결정** (단순 최고확률 아님): `draw_edge(=pdraw−26)>5 → DRAW`, `p1>55 → team1`, `p2>55 → team2`, 그 외(UNDER 2.5/No clear edge) → 최고확률 fallback. POST는 저장된 `suggested_bet` 문자열을 파싱해서 사용(없으면 재계산). `_season_record()`도 같은 규칙(확률 기반)이라 결과 수렴.
-- **POST-MATCH 표시 = 경기 전 값.** 상단 확률 바 "Pre-Match Odds"(저장 스냅샷), "Pre-Match Signal"(저장 model_edge). 둘 다 저장값 우선, 없으면 현재 재계산 fallback. 완료 경기는 ELO가 결과 반영 후라 재계산값은 진짜 pre-kickoff와 다를 수 있음 → 스냅샷이 정답.
+- **predicted_winner = 순수 argmax (Layer B).** `argmax(p_home, p_draw, p_away)` — 최빈 결과가 곧 예측. **비대칭 문턱·26% baseline 없음.** 신뢰도 = 최빈 확률, `is_tossup` = 상위 2개 차 < 5pp(=0.05, 대칭). 라벨 산출 = `app.py generate_prediction_label()`(번들 키 `b["prediction"]`). POST는 **저장 분포 스냅샷의 argmax**로 결정(legacy `suggested_bet` 문자열 파싱 안 함 — 구 draw 편향 차단). `_season_record()`도 argmax라 결과 수렴.
+- **POST-MATCH 표시 = 경기 전 값.** 상단 확률 바 "Pre-Match Odds"(저장 분포 스냅샷), "Pre-Match Prediction"(저장 분포 argmax 라벨 + 신뢰도 + toss-up + 중립 xG합). 분포 스냅샷 우선 — 완료 경기는 ELO가 결과 반영 후라 재계산값은 진짜 pre-kickoff와 다를 수 있음 → 스냅샷이 정답. 라벨은 그 스냅샷에서 결정적으로 재계산되므로 legacy 행도 백필 없이 정상.
 - **`/api/brier`** 라우트 = `{brier_score, n_matches}`.
 - **`_run_due_predictions()`** (app.py 백그라운드) — scheduled + 킥오프 2h 전 + 예측 없는 경기만 저장. **이미 in_progress/completed면 재예측 안 함** (한 번 놓치면 그 경기는 예측 없이 끝남).
 
@@ -140,7 +152,7 @@
 ### `/match/<id>` (match.html) — PRE / POST 모드 (Home/Away 레이블 없음)
 - **헤더:** 국기+팀명, ctx_line ("GROUP G · MATCHDAY 1 · 14:00 EST"). POST는 스코어 크게.
 - **확률 바:** team1/draw/team2 (인라인 width+background, `<div>` 블록 — §11.7).
-- **PRE:** Pre-Match Analysis(영어 내러티브) + 수학블록(λ/μ/ρ/P(0-0)…) + **MODEL EDGE**(suggested_bet) + Scoreline TOP5(결과별 색) + Team Strength.
+- **PRE:** Pre-Match Analysis(영어 내러티브) + 수학블록(λ/μ/ρ/P(0-0)…) + **Model Prediction**(argmax 라벨 + 신뢰도 + toss-up 칩 + 중립 xG합) + Scoreline TOP5(결과별 색) + Team Strength.
 - **POST:** Prediction vs Result + 예측 적중 ✓/✗ + Brier + **SEASON RECORD** + **구조화 Post-Match Review**(got_right/missed/key_factors) + Scoreline + Team Strength.
 
 ### `/api/brier`
@@ -155,7 +167,7 @@
 
 ```
 worldcup-predictor/
-├── app.py                # Flask 라우트 + 엔진 워밍 + 백그라운드 sync + 영어 내러티브/model_edge/season_record + TEAM_FLAGS + EST
+├── app.py                # Flask 라우트 + 엔진 워밍 + 백그라운드 sync + 영어 내러티브/generate_prediction_label(argmax)/season_record + TEAM_FLAGS + EST
 ├── model.py              # 7 엔진 + INITIAL_RATINGS_2026/FIFA_POINTS_2026 + estimate_rho + save_prediction + compute_brier_score
 ├── database.py           # 듀얼 백엔드 + PostgreSQL 호환 레이어(_translate_sql)
 ├── data_pipeline.py      # BALLDONTLIE 백필/sync (CLI: backfill/sync/today/live/names/events) + sync_live_lite + enrich_completed_matches_2026
@@ -274,7 +286,8 @@ FLASK_DEBUG=True
 - [x] **POST-MATCH 페이지 + 예측 추적 (save_prediction/compute_brier_score/`/api/brier`/SEASON RECORD)**
 - [x] **user_notes → 모델 λ 반영** (`apply_user_notes`, app.py `_load_user_notes`)
 - [x] **MATCHIQ 리브랜드** (영어 UI, 사이드바, PRE/POST, 국기, EST, MODEL EDGE, 구조화 리뷰)
-- [x] **edge 스냅샷** (predictions에 suggested_bet/draw_edge/total_xg) + predicted_winner를 model edge 기준으로 + POST "Pre-Match Odds/Signal"
+- [x] **edge 스냅샷** (predictions에 suggested_bet/draw_edge/total_xg) + POST "Pre-Match Odds/Signal" — **이후 Layer B에서 predicted_winner를 순수 argmax로 교체(`d0e69a1`), 26% baseline·비대칭 문턱 제거. draw_edge는 신규 NULL.**
+- [x] **Layer B argmax 라벨링** (`d0e69a1`) — `generate_prediction_label`, `b["prediction"]`, 새 컬럼 predicted_outcome/confidence/is_tossup(비파괴 ADD), 중립 xG 표시. 검증 OLD 2/5→argmax 3/5.
 - [x] **"No prediction recorded"** — 스냅샷 없는 완료 경기는 가짜 적중 판정 안 함 (`63455fd`)
 - [x] **Eastern DST 자동** (`ZoneInfo America/New_York` + `tzdata` + 동적 라벨) — §11.6 결정 완료 (`63455fd`)
 - [x] **POST "Pre-Match Odds" 스냅샷-only** — 재계산값 표시 차단 (`fc359f8`)
