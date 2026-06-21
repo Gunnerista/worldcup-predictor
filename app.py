@@ -329,7 +329,7 @@ def generate_pre_match_narrative(b) -> str:
     if b["scorelines"]:
         top = b["scorelines"][0]
         parts.append(f"Most likely scoreline: {top['scoreline']} ({top['probability_pct']}%).")
-    parts.append(f"Pattern-based upset probability: {b['upset_pct']:.0f}%.")
+    parts.append(f"Upset probability (model win chance for the ELO underdog): {b['upset_pct']:.0f}%.")
     return " ".join(parts)
 
 
@@ -469,7 +469,11 @@ def _est_label(iso):
 # the confidence magnitude softens. NOTE: validated only for the core engine path;
 # the live-only stages (player_xG_adj, situation_mult) are not covered by this fit.
 CALIBRATION_T = 1.718
-CALIBRATION_VERSION = "v1+tcal"   # predictions.model_version cutover marker
+CALIBRATION_VERSION = "v1.1+tcal"   # predictions.model_version cutover marker
+# v1.1: sample-size strength shrinkage + raised λ cap (5.0) + model-derived upset
+# probability (BUG1/3/4/5). Distributions saved from here differ from "v1+tcal";
+# the bumped marker keeps pre/post-fix predictions distinguishable for analysis.
+# Existing rows are never rewritten (the stored-snapshot integrity rule).
 
 
 def calibrate_wdl(p_home, p_draw, p_away):
@@ -602,20 +606,15 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
         eg = pred["expected_goals"]
         mtx = pred["matrix"]
 
-        # Upset probability via pattern matcher.
-        home_recent = _recent_team_stats(conn, t1)
-        away_recent = _recent_team_stats(conn, t2)
-        xg_diff = round(home_recent["xg_total"] - away_recent["xg_total"], 2)
-        upset_pct = _pattern_matcher.calculate_upset_probability(
-            _pattern_matcher.find_similar_matches({
-                "xg_diff": xg_diff,
-                "elo_diff": elo1 - elo2,
-                "possession_diff": home_recent["possession_pct"] - away_recent["possession_pct"],
-                "shots_diff": home_recent["shots_total"] - away_recent["shots_total"],
-                "fatigue_diff": 0,
-                "elimination_pressure": 0,
-            }, top_n=3)
-        )
+        # Upset probability = the model's probability that the ELO underdog wins
+        # (BUG5). The previous pattern-matcher k-NN ignored the ELO gap entirely —
+        # its historical feature vectors hardcode elo_diff=0, so that dimension was
+        # treated as uninformative — and its nearest neighbours for a favorite-vs-
+        # underdog matchup were almost always non-upsets, collapsing the figure to
+        # 0% for essentially every match. The model's own underdog win probability
+        # is the honest, never-spuriously-zero answer and matches intuition
+        # (e.g. Netherlands vs Sweden -> Sweden's win probability).
+        upset_pct = round(cwa) if elo1 >= elo2 else round(cwh)
 
         # Team strength cards.
         strengths = _team_strengths_from_db()

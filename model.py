@@ -1436,9 +1436,27 @@ class DixonColesEngine:
         lam = home_attack * away_defense * ha * elo_weight
         mu  = away_attack * home_defense * (1.0 / elo_weight)
 
-        # Clamp to a realistic per-match expected-goals range [0.3, 3.0].
-        lam = max(0.3, min(3.0, lam))
-        mu  = max(0.3, min(3.0, mu))
+        # BUG1 guard: warn when attack/defense strengths OVERRIDE the ELO signal —
+        # i.e. ELO clearly favours one side (gap >= 100) but the strength-driven λ
+        # flips the expected-goals edge to the other side by a non-trivial margin.
+        # This is the pathological case where an unrepresentative strength sample
+        # buries the ELO prior (the sample-size shrinkage in _team_strengths_from_db
+        # is the fix; this log surfaces any residual flips). A mere divergence in
+        # magnitude is normal — Dixon-Coles deliberately uses BOTH signals — so we
+        # only flag an actual reversal, which keeps the log quiet in normal use.
+        if abs(elo_diff) >= 100 and (elo_diff > 0) != (lam >= mu) and abs(lam - mu) >= 0.25:
+            print(
+                f"[model] WARN attack/defense overrides ELO: elo_diff={elo_diff:.0f} "
+                f"favours {'home' if elo_diff > 0 else 'away'} but lambda favours "
+                f"{'home' if lam >= mu else 'away'} (lam={lam:.2f}, mu={mu:.2f})",
+                file=sys.stderr, flush=True,
+            )
+
+        # Clamp to a realistic per-match expected-goals range. Upper bound raised
+        # 3.0 -> 5.0 (BUG3) so dominant attacks are not compressed; the floor 0.3
+        # keeps λ strictly positive. MAX_GOALS=6 leaves the Poisson matrix headroom.
+        lam = max(0.3, min(5.0, lam))
+        mu  = max(0.3, min(5.0, mu))
         return lam, mu
 
     def scoreline_matrix(
@@ -1661,7 +1679,7 @@ class DixonColesEngine:
                                             +0.08 if it mentions "attacking"
           condition      : "negative" -> -0.07 | "positive" -> +0.07 | else 0
 
-        Returns the adjusted λ, clamped to [0.3, 3.0]. team_name is accepted for
+        Returns the adjusted λ, clamped to [0.3, 5.0]. team_name is accepted for
         symmetry/logging but does not affect the math.
         """
         if not notes_dict:
@@ -1685,7 +1703,7 @@ class DixonColesEngine:
         elif cond == "positive":
             lam += 0.07
 
-        return max(0.3, min(3.0, lam))
+        return max(0.3, min(5.0, lam))
 
     def predict_from_db(
         self,
@@ -2172,6 +2190,7 @@ def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str,
         rows = conn.execute(
             """
             SELECT t.name AS name,
+                   COUNT(*) AS games,
                    AVG(CASE WHEN ts.is_home = 1 THEN m.home_score ELSE m.away_score END) AS gf,
                    AVG(CASE WHEN ts.is_home = 1 THEN m.away_score ELSE m.home_score END) AS ga
             FROM team_stats ts
@@ -2196,13 +2215,37 @@ def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str,
     if league_avg <= 0:
         return {}
 
-    return {
-        r["name"]: {
-            "attack":  float(round(float(r["gf"] or 0) / league_avg, 4)),
-            "defense": float(round(float(r["ga"] or 0) / league_avg, 4)),
+    # Sample-size confidence weight. A team's attack/defense ratio is unreliable
+    # when computed from one or two matches (a single 5-1 result can otherwise
+    # double a team's attack and swamp the ELO prior — see BUG1/BUG4). Shrink the
+    # ratio toward the neutral 1.0 until enough matches accumulate; ELO, which
+    # already encodes long-run strength, then carries the low-sample matchups.
+    def _confidence_weight(n: int) -> float:
+        if n <= 0:
+            return 0.0
+        if n == 1:
+            return 0.3
+        if n == 2:
+            return 0.6
+        return 1.0
+
+    out: dict[str, dict[str, float]] = {}
+    for r in rows:
+        n = int(r["games"] or 0)
+        w = _confidence_weight(n)
+        raw_attack  = float(r["gf"] or 0) / league_avg
+        raw_defense = float(r["ga"] or 0) / league_avg
+        # Shrink toward 1.0 (league-neutral). At n>=3, w=1.0 -> raw value kept.
+        attack  = 1.0 + (raw_attack  - 1.0) * w
+        defense = 1.0 + (raw_defense - 1.0) * w
+        out[r["name"]] = {
+            "attack":      float(round(attack, 4)),
+            "defense":     float(round(defense, 4)),
+            "games":       n,
+            "attack_raw":  float(round(raw_attack, 4)),
+            "defense_raw": float(round(raw_defense, 4)),
         }
-        for r in rows
-    }
+    return out
 
 
 def build_2026_elo(db_path: str = "worldcup.db") -> dict[str, float]:
