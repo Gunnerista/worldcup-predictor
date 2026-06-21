@@ -3,7 +3,7 @@
 이 파일은 프로젝트 단일 진실 공급원(SSoT). 컨텍스트가 꽉 차서 새 세션을 열어도, 이 문서만 읽으면 그대로 이어갈 수 있어야 함.
 
 > **새 세션 필독:** §11 함정(Gotchas) 먼저 읽어. 같은 함정에 두 번 빠지지 마.
-> **최종 갱신:** 2026-06-17 (**temperature 캘리브레이션 T=1.718** + **/methodology 평가 페이지** / Layer B argmax / 파이프라인 라이브 검증)
+> **최종 갱신:** 2026-06-20 (**v1.1+tcal: strength shrinkage + λ cap 5.0 + upset 재정의** / temperature T=1.718 / /methodology / Layer B argmax)
 
 ---
 
@@ -35,8 +35,20 @@
 - **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
 - **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, **Eastern(DST 자동) 시간**.
 
-### 3.1 마지막 세션 인수인계 (2026-06-17 — calibration + /methodology)
-**이번 세션 (temperature 캘리브레이션 + 평가 페이지 + 파이프라인 검증):**
+### 3.1 마지막 세션 인수인계 (2026-06-20 — v1.1+tcal 5버그 수정)
+**이번 세션 (strength shrinkage + λ cap + upset 재정의 + draw 분포 검증):** 진단 5버그 수정, 단일 커밋 `35bea2e`(`fix(model): shrinkage, xG cap, upset prob, attack floor — v1.1+tcal`) push+Railway 배포+라이브 검증 완료.
+- **BUG1/BUG4 (동일 뿌리 = 저표본 strength).** `model.py _team_strengths_from_db`가 경기 1~2개로 산출한 attack/defense를 극단값(Haiti attack **0.0**, 1경기 0득점)으로 뱉어 λ를 왜곡 → ELO 뒤집고 draw 부풀림. **수정: 경기수 기반 신뢰도 shrinkage**(n=1→0.3, n=2→0.6, n≥3→1.0)로 중립 1.0 방향 수축: `attack = 1.0 + (raw-1.0)*w`. ELO가 저표본 매치업을 주도하게 됨. 함수는 이제 `games`/`attack_raw`/`defense_raw`도 반환(비파괴). 검증: Haiti 0.0→**0.7**(카드 표시도 정상화). **`_expected_goals`에 ELO override 경고 로그**: `|elo_diff|≥100`인데 strength-driven λ가 ELO 우세팀을 뒤집고 `|lam-mu|≥0.25`일 때만 stderr WARN(=실제 reversal만, 104경기 중 4건 — 노이즈 X).
+- **BUG3 (xG cap).** `_expected_goals` + `apply_user_notes` λ/μ 상한 **3.0→5.0**(하한 0.3 유지=양수 보장). MAX_GOALS=6 헤드룸 충분. 검증: 14경기가 새 헤드룸(>3.0) 사용 → 강팀 xG 압축 해제. **주의: "xG For" 카드는 `_match_strength` 원시 평균(cap 없음)** — 운영자가 본 "3.00 cap"은 사실 λ 상한이었음.
+- **BUG5 (upset 항상 0%).** 기존 패턴매처 k-NN이 elo_diff를 무시(historical feature가 elo_diff=0 하드코딩→std 무한대→무시)하고 팀 평균 피처로 최근접 이웃 → favorite 매치업에서 거의 0% 고정. **수정: upset = ELO 약체의 모델(캘리브레이션) 승률.** `_build_pre_match_bundle`에서 `upset_pct = round(cwa if elo1≥elo2 else cwh)`. 검증: 31/33/27 = 10/27/24%, 라이브 match/33 = **11%**(데이터 다름, 비0 확인). 내러티브 문구도 갱신. `_pattern_matcher` 전역은 보존(upset 용도만 제거).
+- **BUG2 (draw 과대) — 근본 해소, 하드코딩 prior 미적용.** RAW draw max **61.4→44.0**, ELO gap≥100 평균 24.3→**21.2%**(실제 WC ~25% 근접). 극단 draw는 저표본/0.0 strength가 원인이었고 BUG1·4로 자동 해소. **운영자 결정: draw cap(0.35) 미적용** — 기준경기 Brazil/Haiti는 draw 25.4%로 통과, 분포 단조·건강, 검증된 T 캘리브레이션 위에 또 다른 하드 보정 안 쌓음(§11.9 argmax 보존·Layer B의 26% baseline 제거 정신). |gap|≥200 7경기가 31~38% 남으나 전부 draw≠argmax라 변호 가능. **재검토 시: argmax-safe cap(draw가 argmax 아닐 때만 35% 상한, 초과분 home/away 비례 재분배) 구현 가능 — /methodology에 명기 필요.**
+- **model_version 컷오버 `v1+tcal`→`v1.1+tcal`** (`CALIBRATION_VERSION`). 거동 변경(shrinkage/cap/upset)으로 저장 분포가 달라지므로 분석상 구분. **기존 저장 스냅샷 불변**(UPDATE/마이그레이션 없음), 신규 예측부터 적용 — 무결성 규칙 유지.
+- **미추적 임시:** `diag_bugs.py`/`diag_verify.py`/`diag_smoke.py`(재현용 진단, 커밋 안 함), 기존 `verify_layerb.py`/`backtest_calibration.py`(후자는 이전 세션 커밋됨).
+- **다음:** away-favorite richer calibration(보류), draw cap 재검토(보류), README 스크린샷 재촬영, LIVE 실시간 푸시, Monte Carlo 진출 시뮬.
+
+---
+
+**이전 세션 (2026-06-17 — calibration + /methodology):**
+**(temperature 캘리브레이션 + 평가 페이지 + 파이프라인 검증):**
 - **Temperature 캘리브레이션 (argmax 보존).** 코어 엔진(DC+ρ+ELO/strength)이 꼬리에서 과신 → 단일 `T=1.718`로 W/D/L 분포 평탄화. **`app.py calibrate_wdl(p_home,p_draw,p_away)` = softmax(log(p)/T)**, 0–100 triple 반환, **단조변환이라 argmax(predicted_outcome·SEASON RECORD) 불변, confidence(%)만 완만**(검증 528/528). 삽입 **3곳(라이브 compute만)**: `_build_pre_match_bundle`(match PRE), `index()` today-cards, `_run_due_predictions`(저장). **POST 스냅샷 경로는 미삽입**(저장값 verbatim, 소급 변환 없음). 신규 저장 `model_version="v1+tcal"`(컷오버 마커, 과거 v1/manual 무변경, 스키마 변경 없음).
 - **T 산출:** 누수 없는 as-of 백테스트(`backtest_calibration.py`, martj42/international_results CC0, 439경기 2025-07~2026-05) → golden-section NLL(scipy 금지). full-set ECE 0.083→0.026, RPS 0.194→0.185. held-out test(n=102): ECE 0.103→0.027, RPS 0.202 vs base-rate 0.215(climatology 이김). away-favorite 잔여 과신(n=7, gap+0.23) = richer calibration 신호, **미적용**.
 - **`/methodology` 평가 페이지** (네비 "Evaluation" 링크). 숫자 전부 `static/calibration_report.json`(백테스트 `--dump` 산출 아티팩트)에서 렌더, **하드코딩 0**. reliability 곡선 = **서버사이드 인라인 SVG**(CDN/JS 의존 없음, viewBox 모바일). 히어로 곡선=전체 439, 지표표=held-out 102(캡션 명시). 정직성 가드: SOTA(0.206) 비교 없음, skill=climatology 우위까지만, 라이브 "X% 적중" 헤드라인 없음, 미검증 2단계(player_xG_adj·situation_mult) 명기.
@@ -65,9 +77,9 @@
 3. **POST "Pre-Match Odds"는 스냅샷-only** — 저장된 예측 없으면 상단 확률 바 자체를 렌더 안 함(완료 경기의 오염된 ELO 재계산값 표시 금지). `app.py` no-snapshot 분기에서 `p1/pdraw/p2=None` + 템플릿 `{% if phase != 'post' or bundle.has_prediction %}`.
 4. **Railway PG 예측 수동 INSERT** — match 14(Belgium vs Egypt, 실제 1-1) 예측을 운영자 요청으로 직접 INSERT: `home/draw/away_pct=32/48/19`(0–100 스케일), `created_at='2026-06-15 15:00:00'`(UTC=11:00 EDT), `model_version='manual'`, `suggested_bet='DRAW — 22pp above market average'`, `draw_edge=22.0`, `total_xg=NULL`. → POST에서 **✓ CORRECT**, SEASON RECORD 1/1.
 
-**Railway predictions 현재 상태 (2026-06-17):** **6건** — match 14(manual), 15–19(자동저장). SEASON RECORD **4/6 CORRECT**. match 1–13은 파이프라인 활성화 이전 완료라 "No prediction recorded". 신규 자동저장은 `v1+tcal`(캘리브레이션 컷오버 이후). **로컬 SQLite는 0건(clean).**
+**Railway predictions 상태 (2026-06-17 기준 관측):** **6건** — match 14(manual), 15–19(자동저장). SEASON RECORD **4/6 CORRECT**. match 1–13은 파이프라인 활성화 이전 완료라 "No prediction recorded". **로컬 SQLite는 0건(clean).** 컷오버: ~v1+tcal까지 저장됨, **2026-06-20부터 신규 자동저장은 `v1.1+tcal`**(shrinkage/cap/upset 반영). 기존 행 불변.
 
-**커밋 (전부 push+배포됨):** `2b18097`(/methodology page), `ddac4a8`(temperature calibration T=1.718), `1633869`(docs Layer B), `d0e69a1`(Layer B argmax), `63455fd`(No prediction recorded + Eastern DST), `fc359f8`(POST 스냅샷-only odds).
+**커밋 (전부 push+배포됨):** `35bea2e`(v1.1+tcal: shrinkage/xG cap/upset/attack floor), `2b18097`(/methodology page), `ddac4a8`(temperature calibration T=1.718), `1633869`(docs Layer B), `d0e69a1`(Layer B argmax), `63455fd`(No prediction recorded + Eastern DST), `fc359f8`(POST 스냅샷-only odds).
 
 **⚠️ 남은 일:**
 - **DATABASE_URL은 이 dev 환경에 자동 주입 안 됨** — Bash 툴에 인라인(`DATABASE_URL="postgresql://..." python ...`)으로 넘겨야 Railway PG 접근. (운영자가 PowerShell `$env:`로 세팅해도 Bash 서브프로세스엔 전파 안 됨.)
@@ -118,7 +130,7 @@
 | **EloEngine** | 표준 ELO + 무승부 모델(`_DRAW_SIGMA=350`) + 호스트/근접 보너스 | rating 숫자만 |
 | **DixonColesEngine** | **메인 모델.** bivariate Poisson + low-score 보정 ρ + 스코어라인 매트릭스 | ✅ W/D/L·xG·스코어라인 |
 | **GroupSituationEngine** | 2026 포맷(12조×4팀, 3위 상위 8팀) 순위·타이브레이커 + 잔여일정 brute-force 시나리오 → 진출 상황 | ✅ situation note |
-| **PatternMatcher** | z-score 유클리드 유사도 → upset 확률 | ✅ upset % |
+| **PatternMatcher** | z-score 유클리드 유사도 (historical) | ❌ **upset 표시엔 더 이상 안 씀** (v1.1: upset = ELO 약체 모델 승률로 재정의, §6.3) |
 | **TacticalEngine** | 약점 zone, 점유율, 고지대 (한국어 출력) | ❌ 미표시 |
 | **PlayerMatchupEngine** | 임팩트 스코어, 피로도 (한국어 출력) | ❌ 미표시 |
 | **NarrativeEngine** | 한국어 리포트 조립 | ❌ 미표시 (UI 영어라 app.py가 영어 내러티브 생성) |
@@ -127,12 +139,13 @@
 ```
 λ_final = base_attack
         × elo_weight       [ELO 강도비, 10**(elo_diff/1600), clamp 0.6–1.67]
-        × away_defense     [DB 팀강도 _team_strengths_from_db, 2026 골 기반]
+        × away_defense     [DB 팀강도 _team_strengths_from_db, 2026 골 기반 + 경기수 shrinkage]
         × player_xG_adj    [_player_xg_adjustment, 최근 라인업 xG/평균, 0.7–1.4]
         × situation_mult   [GroupSituation lambda_multiplier]
         × notes_adj        [apply_user_notes, 가산식]
 ```
-- 최종 lam/mu clamp `[0.3, 3.0]`. 결과 dict: `win_draw_loss`, `expected_goals`, `top_scorelines`, `matrix`, `situation`, `player_adjustment`, `notes_adjustment`, `strength_source`.
+- 최종 lam/mu clamp **`[0.3, 5.0]`** (v1.1: 상한 3.0→5.0, BUG3 — 강팀 xG 압축 해제. 하한 0.3=양수 보장). 결과 dict: `win_draw_loss`, `expected_goals`, `top_scorelines`, `matrix`, `situation`, `player_adjustment`, `notes_adjustment`, `strength_source`.
+- **★ strength shrinkage (v1.1, BUG1/BUG4).** `_team_strengths_from_db`가 attack/defense를 **경기수 신뢰도로 중립 1.0 방향 수축**: `1.0 + (raw-1.0)*w`, `w`=n1→0.3·n2→0.6·n≥3→1.0. 저표본 팀(1경기 0득점 → raw attack 0.0)이 ELO를 뒤집는 것 방지(0.0→0.7). 함수가 `games`/`attack_raw`/`defense_raw`도 반환(비파괴). `_expected_goals`는 **ELO override 경고**: `|elo_diff|≥100`인데 λ가 ELO 우세팀 뒤집고 `|lam-mu|≥0.25`면 stderr WARN(실제 reversal만).
 - **ρ = -0.1514** — `estimate_rho()`가 2018+2022 128경기로 **MLE(golden-section search)** 추정. scipy 안 씀(순수 Python). `DixonColesEngine.__init__`에서 호출, `_RHO_CACHE`로 1회만. `RHO_SOURCE` = "estimated_from_data"/"fallback_default".
 
 ### 6.2 ELO 시드 (FIFA 랭킹 기반)
@@ -142,7 +155,8 @@
 - app.py `_build_live_elo_2026()`가 시드 baseline + build_2026_elo 결과 overlay.
 
 ### 6.3 예측 추적 (`model.py` + `app.py`)
-- **★ Temperature 캘리브레이션 (후처리, argmax 보존).** 엔진이 W/D/L 분포를 뱉은 **직후** `app.py calibrate_wdl(h,d,a)` = `softmax(log(p)/CALIBRATION_T)`, `CALIBRATION_T=1.718`. 라이브 compute 3곳(PRE 렌더·index 카드·저장)에 적용, **POST 스냅샷 경로는 제외**(저장값 verbatim). 단조라 argmax 불변(confidence만 완만). 신규 저장 `model_version="v1+tcal"`. T 출처·근거 = `backtest_calibration.py` → `static/calibration_report.json`. **§11.9 참고.**
+- **★ Temperature 캘리브레이션 (후처리, argmax 보존).** 엔진이 W/D/L 분포를 뱉은 **직후** `app.py calibrate_wdl(h,d,a)` = `softmax(log(p)/CALIBRATION_T)`, `CALIBRATION_T=1.718`. 라이브 compute 3곳(PRE 렌더·index 카드·저장)에 적용, **POST 스냅샷 경로는 제외**(저장값 verbatim). 단조라 argmax 불변(confidence만 완만). 신규 저장 `model_version="v1.1+tcal"` (`CALIBRATION_VERSION`; v1.1=shrinkage/cap/upset 컷오버). T 출처·근거 = `backtest_calibration.py` → `static/calibration_report.json`. **§11.9 참고.**
+- **★ upset 확률 = ELO 약체의 모델 승률 (v1.1, BUG5).** `_build_pre_match_bundle`에서 `upset_pct = round(cwa if elo1≥elo2 else cwh)` (캘리브레이션 후 분포 사용). 구 PatternMatcher k-NN은 elo_diff 무시(historical feature가 elo_diff=0 하드코딩)+팀 평균 피처라 favorite 매치업에서 거의 **0% 고정** → 폐기. 저장 안 함(표시 전용). 내러티브 문구 "Upset probability (model win chance for the ELO underdog)".
 - **`save_prediction()`** — predictions에 킥오프 전 예측 저장. **분포 + Layer B 라벨 스냅샷 저장**: `home/draw/away_win_pct` + `predicted_outcome`/`confidence`/`is_tossup` + `suggested_bet`(표시용 라벨 문자열)/`total_xg`. `draw_edge`는 컬럼 보존하되 신규 저장 시 **NULL**(26 baseline 제거). database.py `_ensure_prediction_edge_columns()`가 init_db에서 idempotent ALTER — 기존 DB도 자동 추가(6개 컬럼).
 - **`compute_brier_score(season=2026)`** — 완료+예측 경기 멀티클래스 Brier `Σ(p−o)²`.
 - **predicted_winner = 순수 argmax (Layer B).** `argmax(p_home, p_draw, p_away)` — 최빈 결과가 곧 예측. **비대칭 문턱·26% baseline 없음.** 신뢰도 = 최빈 확률, `is_tossup` = 상위 2개 차 < 5pp(=0.05, 대칭). 라벨 산출 = `app.py generate_prediction_label()`(번들 키 `b["prediction"]`). POST는 **저장 분포 스냅샷의 argmax**로 결정(legacy `suggested_bet` 문자열 파싱 안 함 — 구 draw 편향 차단). `_season_record()`도 argmax라 결과 수렴.
@@ -295,9 +309,13 @@ FLASK_DEBUG=True
 - **PG `AVG(정수컬럼)`은 `decimal.Decimal` 반환** → `Decimal * float` TypeError. (SQLite는 float라 로컬선 멀쩡 → 디버깅 함정)
 - **DB에서 가져온 숫자는 전부 `float()` 캐스팅.** `_team_strengths_from_db`, `_player_xg_adjustment`, `predict_from_db`의 ha/hd/aa/ad 등에 적용됨. 새 DB 쿼리 추가 시 항상 float() 래핑.
 
-### 11.9 Temperature 캘리브레이션 + 평가 아티팩트
-- **`calibrate_wdl`은 라이브 compute 3곳에만, POST 스냅샷 경로엔 절대 적용 금지** — 과거 저장 예측 소급 변환되면 안 됨(컷오버 = `model_version="v1+tcal"`). 새 W/D/L 노출 경로 추가 시 calibrate 적용 + 스냅샷 경로 제외 일관성 유지.
+### 11.9 Temperature 캘리브레이션 + 평가 아티팩트 + v1.1 strength/upset
+- **`calibrate_wdl`은 라이브 compute 3곳에만, POST 스냅샷 경로엔 절대 적용 금지** — 과거 저장 예측 소급 변환되면 안 됨(컷오버 = `model_version="v1.1+tcal"`). 새 W/D/L 노출 경로 추가 시 calibrate 적용 + 스냅샷 경로 제외 일관성 유지.
 - **단조변환이라 argmax 보존** — 캘리브레이션 바꿔도 predicted_outcome·SEASON RECORD 불변이어야 정상. 바뀌면 버그(중단).
+- **★ strength shrinkage는 `_team_strengths_from_db` 단일 출처** (model+표시카드 동시 반영). n<3 팀은 attack/defense가 중립 1.0 방향 수축됨 — 라이브 카드가 raw와 다를 수 있음(정상, `attack_raw`/`defense_raw`도 반환). 새 strength 소비 경로는 이 dict를 그대로 쓸 것(재계산 금지).
+- **★ λ cap = `[0.3, 5.0]`** (`_expected_goals`+`apply_user_notes` 둘 다). 한쪽만 고치면 notes가 λ를 다시 3.0으로 잘림 — 항상 같이.
+- **★ upset_pct = ELO 약체 모델 승률** (표시 전용, 저장 안 함). PatternMatcher k-NN으로 되돌리지 말 것(elo_diff 무시 → 0% 고정 회귀). §6.3.
+- **draw cap(0.35) 미적용 — 운영자 결정(2026-06-20).** 재도입 시 반드시 **argmax-safe**(draw가 argmax 아닐 때만, 초과분 home/away 비례 재분배)로, /methodology에 명기. 무지성 draw 억제는 §11.9 argmax 규칙 위반.
 - **`static/calibration_report.json`이 /methodology의 진실원.** Railway엔 `results.csv`(martj42, 로컬 temp) 없어 **백테스트 재계산 불가** → JSON을 로컬에서 `--dump`로 만들어 **커밋**해야 라이브 반영. 코드/JSON 어긋남 방지 위해 meta에 `git_commit`/`generated_at` 박힘(페이지 footer 노출).
 - **`backtest_calibration.py`는 라이브 엔진 `DixonColesEngine.predict()` 재사용**(새 엔진 X). 입력(strength/ELO)만 as-of international로 교체. `player_xG_adj`/`situation_mult`는 2026 전용이라 백테스트 미검증(페이지에 명기). scipy 금지 — golden-section.
 
@@ -318,6 +336,7 @@ FLASK_DEBUG=True
 - [x] **Layer B argmax 라벨링** (`d0e69a1`) — `generate_prediction_label`, `b["prediction"]`, 새 컬럼 predicted_outcome/confidence/is_tossup(비파괴 ADD), 중립 xG 표시. 검증 OLD 2/5→argmax 3/5.
 - [x] **Temperature 캘리브레이션 T=1.718** (`ddac4a8`) — `calibrate_wdl` 후처리 3곳, argmax 보존, `v1+tcal` 컷오버. 누수 없는 백테스트 검증(ECE 0.083→0.026). §11.9.
 - [x] **/methodology 평가 페이지** (`2b18097`) — `calibration_report.json` 기반 reliability SVG·지표표·한계, `backtest_calibration.py` 커밋(재현). 라이브 검증 완료.
+- [x] **v1.1+tcal 5버그 수정** (`35bea2e`) — strength 경기수 shrinkage(BUG1/4), λ cap 3.0→5.0(BUG3), upset=ELO 약체 모델 승률(BUG5), draw 근본 해소(BUG2, cap 미적용). model_version 컷오버. 로컬+라이브 검증 완료. §3.1·§6.1·§6.3·§11.9.
 - [x] **"No prediction recorded"** — 스냅샷 없는 완료 경기는 가짜 적중 판정 안 함 (`63455fd`)
 - [x] **Eastern DST 자동** (`ZoneInfo America/New_York` + `tzdata` + 동적 라벨) — §11.6 결정 완료 (`63455fd`)
 - [x] **POST "Pre-Match Odds" 스냅샷-only** — 재계산값 표시 차단 (`fc359f8`)
@@ -328,6 +347,7 @@ FLASK_DEBUG=True
 - [ ] **Railway PG에 실제 데이터 마이그레이션** (`migrate.py`) — 또는 백그라운드 sync가 채우게 (운영자 확인 필요). teams 112/matches 104는 적재됨.
 - [x] **SEASON RECORD 자동 채워짐** — Railway predictions 6건(14–19), 4/6 CORRECT. 백그라운드 sync가 킥오프 전 자동저장→완료 전환→채점 (라이브 검증됨).
 - [ ] **away-favorite richer calibration** — 단일 T 후 잔여 과신(n=7, gap+0.23). per-class/vector scaling 신호, 표본 더 모이면 검토(현재 미적용).
+- [ ] **draw cap(argmax-safe 0.35) 재검토** — v1.1 후 압도적 mismatch 7경기(|gap|≥200)가 CAL draw 31~38% 잔존(전부 draw≠argmax). 운영자 결정으로 현재 미적용. §11.9.
 - [ ] **README 스크린샷 재촬영**(선택) — Eastern/odds/calibration/methodology 반영.
 - [ ] LIVE phase 실시간 푸시 (현재 60s DB 폴링 + 백그라운드 sync)
 - [ ] Monte Carlo 토너먼트 진출 시뮬레이션 (3위 cross-group 컷 포함)
@@ -353,6 +373,10 @@ FLASK_DEBUG=True
 - Remote: `https://github.com/Gunnerista/worldcup-predictor.git`, branch `main`
 - 커밋 메시지 영어. **민감정보 git 유출 없음 확인됨** (.env/*.db gitignore, 히스토리·추적파일·스크린샷 전부 클린 — 2026-06-15 점검).
 - 최근 마일스톤:
+  - `fix(model): shrinkage, xG cap, upset prob, attack floor — v1.1+tcal` (35bea2e)
+  - `feat: /methodology evaluation & calibration page (data-driven)` (2b18097)
+  - `feat: temperature-calibrate W/D/L distribution (T=1.718, argmax-preserving)` (ddac4a8)
+  - `Layer B: replace draw-biased threshold cascade with argmax labeling` (d0e69a1)
   - `fix: POST-MATCH Pre-Match Odds shows snapshot only, never recompute` (fc359f8)
   - `feat: show "No prediction recorded" + DST-aware Eastern time` (63455fd)
   - `feat: MATCHIQ rebrand — full English, team names replace home/away, date sidebar, pre/post modes`
