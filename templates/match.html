@@ -26,6 +26,26 @@
          pre-kickoff snapshot, never a post-result recompute -->
     {% if phase != 'post' or bundle.has_prediction %}
     {% if phase == 'post' %}<div class="label" style="margin-bottom:6px">Pre-Match Odds</div>{% endif %}
+    {% if bundle.is_knockout and phase != 'post' %}
+    <!-- knockout: no draw -> 2-way advance probability (win + half the draw) -->
+    <div class="label" style="margin-bottom:6px">Advance probability &middot; knockout (no draw)</div>
+    <div class="prob-bar">
+        <div class="pb-row r1">
+            <span class="name">{{ bundle.team1 }}</span>
+            <div class="prob-track" style="flex:1; height:10px; background:#1a2035; border-radius:5px; overflow:hidden;">
+                <div style="width: {{ bundle.adv1 }}%; height:100%; background:#1D9E75;"></div>
+            </div>
+            <span class="pct">{{ bundle.adv1 }}%</span>
+        </div>
+        <div class="pb-row r2">
+            <span class="name">{{ bundle.team2 }}</span>
+            <div class="prob-track" style="flex:1; height:10px; background:#1a2035; border-radius:5px; overflow:hidden;">
+                <div style="width: {{ bundle.adv2 }}%; height:100%; background:#378ADD;"></div>
+            </div>
+            <span class="pct">{{ bundle.adv2 }}%</span>
+        </div>
+    </div>
+    {% else %}
     <div class="prob-bar">
         <div class="pb-row r1">
             <span class="name">{{ bundle.team1 }}</span>
@@ -49,6 +69,7 @@
             <span class="pct">{{ bundle.p2 }}%</span>
         </div>
     </div>
+    {% endif %}
     {% endif %}
 
     {% if phase == 'post' %}

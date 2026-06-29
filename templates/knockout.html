@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="ko-page">
+
+    <a class="ko-back" href="/">&larr; All fixtures</a>
+
+    <header class="ko-head">
+        <div class="ko-logo">MATCHIQ</div>
+        <h1>Road to the Final</h1>
+        <p class="ko-sub">
+            The most-likely path through the confirmed 32-team bracket, with each team's
+            chance of reaching that round &mdash; from {{ '{:,}'.format(iters) }} Monte&nbsp;Carlo simulations.
+        </p>
+        <div class="ko-badge">
+            Pure team-data engine &middot; no player/injury guessing &middot;
+            validated on 60 group games
+        </div>
+    </header>
+
+    <!-- ===================== Bracket tree ===================== -->
+    <div class="bk-scroll">
+        <div class="bk-tree">
+            {% for rnd in rounds %}
+            <div class="bk-round">
+                <div class="bk-round-name">{{ rnd.name }}</div>
+                <div class="bk-round-body">
+                    {% for m in rnd.matches %}
+                    {% if rnd.kind == 'r32' %}
+                    <a class="bk-match{% if m.done %} done{% endif %}" href="/match/{{ m.id }}">
+                        <div class="bk-slot{% if m.top.win %} win{% endif %}">
+                            <span class="bk-name">{{ m.top.flag }} {{ m.top.team }}</span>
+                            <span class="bk-pct">{{ m.top.pct }}%</span>
+                        </div>
+                        <div class="bk-slot{% if m.bot.win %} win{% endif %}">
+                            <span class="bk-name">{{ m.bot.flag }} {{ m.bot.team }}</span>
+                            <span class="bk-pct">{{ m.bot.pct }}%</span>
+                        </div>
+                        {% if m.done %}<span class="bk-ft">FT</span>{% endif %}
+                    </a>
+                    {% else %}
+                    <div class="bk-match feeder">
+                        <div class="bk-slot">
+                            <span class="bk-name">{{ m.top.flag }} {{ m.top.team }}</span>
+                            <span class="bk-pct">{{ m.top.pct }}%</span>
+                        </div>
+                        <div class="bk-slot">
+                            <span class="bk-name">{{ m.bot.flag }} {{ m.bot.team }}</span>
+                            <span class="bk-pct">{{ m.bot.pct }}%</span>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+
+            <!-- champion column -->
+            <div class="bk-round bk-champ-round">
+                <div class="bk-round-name">Champion</div>
+                <div class="bk-round-body">
+                    <div class="bk-trophy">
+                        <div class="bk-trophy-ico">&#127942;</div>
+                        <div class="bk-trophy-team">{{ champion.flag }} {{ champion.team }}</div>
+                        <div class="bk-trophy-pct">{{ champion.pct }}% to win it all</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="bk-hint">Most-likely path shown &middot; % = chance to reach that round &middot; scroll &rarr; for later rounds</div>
+
+    <!-- ===================== Champion board ===================== -->
+    <section class="ko-section">
+        <h2 class="ko-h2">Full title odds</h2>
+        <div class="ko-board">
+            <div class="ko-row ko-row-head">
+                <span class="ko-team">Team</span>
+                <span class="ko-col">R16</span>
+                <span class="ko-col">QF</span>
+                <span class="ko-col">SF</span>
+                <span class="ko-col">Final</span>
+                <span class="ko-col ko-champ-col">Champion</span>
+            </div>
+            {% set top = board[0].champ if board and board[0].champ > 0 else 1 %}
+            {% for t in board %}
+            <div class="ko-row">
+                <span class="ko-team">{{ t.flag }} {{ t.team }}</span>
+                <span class="ko-col">{{ t.r16 }}</span>
+                <span class="ko-col">{{ t.qf }}</span>
+                <span class="ko-col">{{ t.sf }}</span>
+                <span class="ko-col">{{ t.final }}</span>
+                <span class="ko-col ko-champ-col">
+                    <span class="ko-champ-bar">
+                        <span style="display:block; height:100%;
+                              width:{{ (t.champ / top * 100)|round(1) }}%;
+                              background:#EF9F27; border-radius:3px;"></span>
+                    </span>
+                    <b class="ko-champ-num">{{ t.champ }}%</b>
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <!-- ===================== Honesty footer ===================== -->
+    <footer class="ko-foot">
+        <div class="ko-foot-title">How to read this</div>
+        <ul>
+            <li><b>The bracket shows the single most-likely path</b> (the favorite advances at
+                each tie). It is the modal scenario, not a certainty &mdash; the board below gives
+                every team's full odds.</li>
+            <li><b>Advance %</b> = win + half of the draw (knockouts have no draws). Extra time /
+                penalties are treated as a coin-flip &mdash; validated on 2018&amp;2022 knockout games.</li>
+            <li><b>Completed ties are fixed</b> to their real result; only undecided ties are simulated.</li>
+            <li><b>Inputs are pure team data</b> &mdash; goals, xG, ELO, form-based strength. No player,
+                injury, or coaching guesses.</li>
+            <li><b>Limitation:</b> champion odds do not yet model strength uncertainty, so they are
+                mildly overconfident for outsiders. See <a href="/methodology">Evaluation</a> for details.</li>
+        </ul>
+    </footer>
+
+</div>
+{% endblock %}

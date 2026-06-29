@@ -611,10 +611,19 @@ def sync_live_lite() -> dict:
 
             before = prev.get(mid)
             # INSERT OR IGNORE won't update existing rows -> explicit UPDATE.
+            # Also refresh team ids: knockout fixtures first arrive with
+            # placeholder teams (e.g. "2A"/"2B") and are later resolved to the
+            # real qualifiers by the API. COALESCE keeps the existing id when the
+            # API has not assigned a team yet, so a still-undecided slot never
+            # gets blanked out.
+            ht_id = (m.get("home_team") or {}).get("id")
+            at_id = (m.get("away_team") or {}).get("id")
             cur.execute(
-                "UPDATE matches SET home_score = ?, away_score = ?, status = ? "
+                "UPDATE matches SET home_score = ?, away_score = ?, status = ?, "
+                "home_team_id = COALESCE(?, home_team_id), "
+                "away_team_id = COALESCE(?, away_team_id) "
                 "WHERE id = ?",
-                (hs, as_, m.get("status"), mid),
+                (hs, as_, m.get("status"), ht_id, at_id, mid),
             )
 
             if before is None:

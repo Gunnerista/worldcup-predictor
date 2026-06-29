@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import sys
 import threading
 import time
@@ -668,6 +669,14 @@ def _build_pre_match_bundle(match_id, conn=None) -> Optional[dict]:
             "strength2": {"elo": round(elo2), "xg_for": xf2, "xg_against": xa2,
                           "attack": s2["attack"], "defense": s2["defense"]},
         }
+        # Knockout ties have no draw: surface a 2-way advance probability
+        # (win + half the draw, the same split validated for the bracket).
+        # group_name is None for every knockout fixture (groups only exist in
+        # the group stage).
+        b["is_knockout"] = group_name is None
+        b["adv1"] = round(cwh + cwd / 2)
+        b["adv2"] = 100 - b["adv1"]
+
         b["narrative_pre"] = generate_pre_match_narrative(b)
         b["prediction"] = generate_prediction_label(b)
 
@@ -953,6 +962,195 @@ def api_brier():
     return {"brier_score": res["brier_score"], "n_matches": res["n_matches"]}
 
 
+# --- Knockout bracket: Monte Carlo over the confirmed R32 bracket ----------
+# Bracket wiring verified from the BALLDONTLIE source labels ("W##" = winner of
+# official match ##). R32 ties map to match numbers 73..88 in kickoff order;
+# R16/QF/SF feed forward from those. Final = winner(101) vs winner(102).
+_KO_R16 = {89: (73, 75), 90: (74, 77), 91: (76, 78), 92: (79, 80),
+           93: (83, 84), 94: (81, 82), 95: (86, 88), 96: (85, 87)}
+_KO_QF = {97: (89, 90), 98: (93, 94), 99: (91, 92), 100: (95, 96)}
+_KO_SF = {101: (97, 98), 102: (99, 100)}
+_KO_ITERS = 20000
+_knockout_cache_result = None
+
+
+def _ko_p_advance(dc, x, y, cache):
+    """P(x advances) in a neutral single-leg tie = win + 0.5*draw (calibrated).
+    No extra-time/penalty modelling: the draw is split 50/50. Validated on
+    2018/2022 knockout (Brier 0.2216) and consistent with the literature that
+    shootouts are ~coin-flips. Pure team data (player adjustment is neutral)."""
+    key = (x, y)
+    if key in cache:
+        return cache[key]
+    pred = dc.predict_from_db(x, y, _elo.get_rating(x), _elo.get_rating(y),
+                              neutral_venue=True)
+    w = pred["win_draw_loss"]
+    cwh, cwd, cwa = calibrate_wdl(w["home_win"], w["draw"], w["away_win"])
+    p = (cwh + 0.5 * cwd) / 100.0
+    cache[key] = p
+    cache[(y, x)] = 1.0 - p   # neutral tie is symmetric
+    return p
+
+
+def _compute_knockout(iters=_KO_ITERS, seed=42):
+    """Monte Carlo the confirmed R32 bracket -> round-by-round + champion
+    probabilities. Completed ties are FIXED to their real winner; only
+    undecided ties are simulated, so the board reflects the live state."""
+    _ensure_engines()
+    dc = DixonColesEngine()
+
+    conn = database.get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT m.id AS id, ht.name AS h, at.name AS a, m.status AS status,
+                   m.home_score AS hs, m.away_score AS as_
+            FROM matches m
+            JOIN teams ht ON ht.id = m.home_team_id
+            JOIN teams at ON at.id = m.away_team_id
+            WHERE m.season = 2026 AND m.stage = 'Round of 32'
+            ORDER BY m.kickoff_utc
+        """).fetchall()
+    finally:
+        conn.close()
+
+    # R32 ties in kickoff order == official match numbers 73..88.
+    r32 = []
+    for r in rows:
+        h, a = r["h"], r["a"]
+        st = (r["status"] or "").lower()
+        winner = None
+        if st in {"completed", "ft", "finished"}:
+            hs, as_ = r["hs"], r["as_"]
+            if hs is not None and as_ is not None and hs != as_:
+                winner = h if hs > as_ else a
+        r32.append((r["id"], h, a, winner))
+
+    teams = [t for (_, h, a, _) in r32 for t in (h, a)]
+    cache = {}
+    rng = random.Random(seed)
+
+    def beats(x, y):
+        return x if rng.random() < _ko_p_advance(dc, x, y, cache) else y
+
+    reach = {t: {"R16": 0, "QF": 0, "SF": 0, "F": 0, "CHAMP": 0} for t in teams}
+
+    for _ in range(iters):
+        win = {}
+        for i, (_id, h, a, fixed) in enumerate(r32):
+            w = fixed if fixed else beats(h, a)
+            win[73 + i] = w
+            reach[w]["R16"] += 1
+        for num, (x, y) in _KO_R16.items():
+            w = beats(win[x], win[y]); win[num] = w; reach[w]["QF"] += 1
+        for num, (x, y) in _KO_QF.items():
+            w = beats(win[x], win[y]); win[num] = w; reach[w]["SF"] += 1
+        for num, (x, y) in _KO_SF.items():
+            w = beats(win[x], win[y]); win[num] = w; reach[w]["F"] += 1
+        champ = beats(win[101], win[102])
+        reach[champ]["CHAMP"] += 1
+
+    board = []
+    for t in sorted(teams, key=lambda t: -reach[t]["CHAMP"]):
+        r = reach[t]
+        board.append({
+            "team": t, "flag": _flag(t),
+            "r16": round(r["R16"] / iters * 100, 1),
+            "qf": round(r["QF"] / iters * 100, 1),
+            "sf": round(r["SF"] / iters * 100, 1),
+            "final": round(r["F"] / iters * 100, 1),
+            "champ": round(r["CHAMP"] / iters * 100, 1),
+        })
+
+    # Modal ("most likely") bracket: at each tie the favorite advances. This is
+    # the single most-probable path, used to label the visual bracket tree.
+    def fav(x, y):
+        return x if _ko_p_advance(dc, x, y, cache) >= 0.5 else y
+
+    modal = {}
+    for i, (_id, h, a, fixed) in enumerate(r32):
+        modal[73 + i] = fixed if fixed else fav(h, a)
+    for num, (x, y) in _KO_R16.items():
+        modal[num] = fav(modal[x], modal[y])
+    for num, (x, y) in _KO_QF.items():
+        modal[num] = fav(modal[x], modal[y])
+    for num, (x, y) in _KO_SF.items():
+        modal[num] = fav(modal[x], modal[y])
+
+    # Visual leaf ordering so each column lines up vertically with the next
+    # (standard bracket layout). expand() replaces each node with its feeders.
+    def expand(nums, wiring):
+        out = []
+        for n in nums:
+            out += list(wiring.get(n, (n,)))
+        return out
+    sf_order = [101, 102]
+    qf_order = expand(sf_order, _KO_SF)         # [97,98,99,100]
+    r16_order = expand(qf_order, _KO_QF)        # 8 R16 match numbers
+    r32_order = expand(r16_order, _KO_R16)      # 16 R32 match numbers, visual order
+
+    def reach_cell(team, key):
+        return {"team": team, "flag": _flag(team),
+                "pct": round(reach[team][key] / iters * 100)}
+
+    # R32 column: real ties with advance %, in bracket order.
+    r32_col = []
+    for num in r32_order:
+        _id, h, a, fixed = r32[num - 73]
+        ph = round(_ko_p_advance(dc, h, a, cache) * 100)
+        r32_col.append({
+            "id": _id, "done": fixed is not None, "winner": fixed,
+            "top": {"team": h, "flag": _flag(h), "pct": ph,
+                    "win": fixed == h},
+            "bot": {"team": a, "flag": _flag(a), "pct": 100 - ph,
+                    "win": fixed == a},
+        })
+
+    def feeder_col(order, wiring, key):
+        col = []
+        for num in order:
+            x, y = wiring[num]
+            col.append({"top": reach_cell(modal[x], key),
+                        "bot": reach_cell(modal[y], key)})
+        return col
+
+    rounds = [
+        {"name": "Round of 32", "kind": "r32", "matches": r32_col},
+        {"name": "Round of 16", "kind": "feeder",
+         "matches": feeder_col(r16_order, _KO_R16, "R16")},
+        {"name": "Quarter-final", "kind": "feeder",
+         "matches": feeder_col(qf_order, _KO_QF, "QF")},
+        {"name": "Semi-final", "kind": "feeder",
+         "matches": feeder_col(sf_order, _KO_SF, "SF")},
+        {"name": "Final", "kind": "feeder",
+         "matches": [{"top": reach_cell(modal[101], "F"),
+                      "bot": reach_cell(modal[102], "F")}]},
+    ]
+    # Trophy = the team with the HIGHEST title odds (board is sorted by champ%),
+    # so it always matches the board's #1 and the intuitive "who will win".
+    # The bracket lines above still show the most-likely path, which can end on a
+    # near-even rival; the trophy is the probability winner, not the modal path.
+    champion = {"team": board[0]["team"], "flag": board[0]["flag"],
+                "pct": board[0]["champ"]}
+
+    return {"board": board, "rounds": rounds, "champion": champion,
+            "iters": iters}
+
+
+def _get_knockout():
+    """Cached knockout result; recomputed lazily after the cache is cleared
+    (the live-sync loop clears it when a result changes, alongside the ELO)."""
+    global _knockout_cache_result
+    if _knockout_cache_result is None:
+        _knockout_cache_result = _compute_knockout()
+    return _knockout_cache_result
+
+
+@app.route("/knockout")
+def knockout():
+    """Knockout bracket: per-tie advance % + Monte Carlo champion board."""
+    return render_template("knockout.html", **_get_knockout())
+
+
 @app.route("/match/<int:match_id>")
 def match_detail(match_id: int):
     bundle = _build_pre_match_bundle(match_id)
@@ -1125,7 +1323,7 @@ def _run_due_predictions() -> int:
 
 
 def _live_sync_loop() -> None:
-    global _elo
+    global _elo, _knockout_cache_result
     while True:
         interval = IDLE_INTERVAL_SEC
         try:
@@ -1153,6 +1351,7 @@ def _live_sync_loop() -> None:
                 # the next prediction request rebuilds ELO (same lazy pattern as
                 # _ensure_engines). GIL makes this assignment atomic.
                 _elo = None
+                _knockout_cache_result = None   # bracket depends on ELO + results
                 print("[sync] ELO invalidated; rebuilds on next prediction", flush=True)
 
             # Save pre-kickoff predictions for matches starting soon.

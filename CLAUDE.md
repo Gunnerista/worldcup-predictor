@@ -3,7 +3,7 @@
 이 파일은 프로젝트 단일 진실 공급원(SSoT). 컨텍스트가 꽉 차서 새 세션을 열어도, 이 문서만 읽으면 그대로 이어갈 수 있어야 함.
 
 > **새 세션 필독:** §11 함정(Gotchas) 먼저 읽어. 같은 함정에 두 번 빠지지 마.
-> **최종 갱신:** 2026-06-20 (**v1.1+tcal: strength shrinkage + λ cap 5.0 + upset 재정의** / temperature T=1.718 / /methodology / Layer B argmax)
+> **최종 갱신:** 2026-06-28 (**Knockout 브래킷 트리 + 우승확률 Monte Carlo** / 32강 placeholder sync 교정 / match 진출% / v1.1+tcal)
 
 ---
 
@@ -35,8 +35,20 @@
 - **Railway DB:** PostgreSQL — 스키마 자동 생성. 데이터는 `migrate.py`로 옮겨야 채워짐 (또는 백그라운드 sync가 2026 데이터를 직접 적재)
 - **MATCHIQ 리브랜드 완료**: 영어 UI, 날짜별 사이드바, PRE/POST 모드, DixonColes 확률, 국기, **Eastern(DST 자동) 시간**.
 
-### 3.1 마지막 세션 인수인계 (2026-06-20 — v1.1+tcal 5버그 수정)
-**이번 세션 (strength shrinkage + λ cap + upset 재정의 + draw 분포 검증):** 진단 5버그 수정, 단일 커밋 `35bea2e`(`fix(model): shrinkage, xG cap, upset prob, attack floor — v1.1+tcal`) push+Railway 배포+라이브 검증 완료.
+### 3.1 마지막 세션 인수인계 (2026-06-28 — Knockout 브래킷 + 우승확률)
+**이번 세션 (knockout 진출/우승 예측 + 32강 placeholder 교정 + 웹 브래킷 + match 진출%):** 단일 커밋으로 push+Railway 배포.
+- **BUG (32강 placeholder 고착) — 수정.** `data_pipeline.py sync_live_lite`가 score/status만 UPDATE하고 `home/away_team_id`는 안 건드림 + `upsert_matches`=`INSERT OR IGNORE` → R32 경기가 "2A vs 2B"로 영구 고착(BALLDONTLIE API는 실제 팀 South Africa-Canada 등 정상 제공, `match_number` 필드는 전부 6으로 깨짐·신뢰불가). **수정: sync UPDATE에 `home_team_id=COALESCE(?,home_team_id)`, `away_team_id=COALESCE(?,…)` 추가** → 다음 sync에 라이브 16경기 실제 팀 자동 교정(COALESCE라 미정 슬롯 보존). 로컬 검증 placeholder 0/16.
+- **데이터 품질 검증.** 진출 32팀 전부 조별 3경기 완료, team_stats+xG 100%(96/96). **2026 player_stats는 불완전**(France 0건 — sync가 rate-limit로 player stats 스킵) → `_player_xg_adjustment` 32팀 전부 **1.0(중립)**. 즉 현재 모든 예측 = **순수 팀 데이터**(골/xG/ELO/strength), 선수/부상/감독 0 개입.
+- **Knockout 엔진 (`app.py _compute_knockout`, MC 20k).** 진출확률 = **win + 0.5*draw**(calibrated; 연장/승부차기=동전던지기, 모델링 안 함). 검증: 2018/2022 knockout 백테스트 Brier **0.2216**(동전 0.25)·문헌(Csató 2025 승부차기≈coinflip, Groll ET) 일치 — 단순 A가 학술 B(ET×⅓ 시뮬)와 동등. 브래킷 wiring = API source "W##" 라벨에서 복원(R32 kickoff순=공식 match# 73-88, R16 89-96…). **완료경기는 실제 승자 고정**(146 Canada). 캐시 `_knockout_cache_result`(sync ELO 무효화 시 같이 클리어).
+- **`/knockout` 페이지 (knockout.html).** 토너먼트 **브래킷 트리**(좌→우 modal 경로, leaf 정렬 expand()) + 우승확률 보드 + 정직성 footer. **트로피=우승확률 1위(board[0]), NOT modal champ** — modal 단일경로 우승자와 MC 1위가 다를 수 있어(France 11.8 vs Brazil 10.8 동급) 혼란 방지차 트로피는 board[0]로 통일. 네비 "Bracket →"(index.html).
+- **match knockout 진출%.** `_build_pre_match_bundle`: `is_knockout = group_name is None`, `adv1=round(cwh+cwd/2)`, `adv2=100-adv1`. match.html **PRE 경로**에서 knockout이면 2-way 진출% 바(무승부 바 제거). **POST/group 무변경**(스냅샷·회귀 없음). 내러티브/MODEL PREDICTION은 W/D/L 기반 유지(정규시간 맥락 — 후속 통일 가능).
+- **미추적 임시:** `diag_knockout.py`/`diag_bugs.py`/`diag_smoke.py`/`diag_verify.py`/`verify_layerb.py` — 커밋 안 함.
+- **다음:** match knockout 내러티브/예측 라벨 통일, parametric bootstrap(챔피언 과신 보정 — 문헌 권고), 시장(Polymarket) 대비 RPS 트래킹, lineup(`/match_lineups` 존재·`/injuries` 404) 기반 결장 자동감지(킥오프 ~1h 전).
+
+---
+
+**이전 세션 (2026-06-20 — v1.1+tcal 5버그 수정):**
+**(strength shrinkage + λ cap + upset 재정의 + draw 분포 검증):** 진단 5버그 수정, 단일 커밋 `35bea2e`(`fix(model): shrinkage, xG cap, upset prob, attack floor — v1.1+tcal`) push+Railway 배포+라이브 검증 완료.
 - **BUG1/BUG4 (동일 뿌리 = 저표본 strength).** `model.py _team_strengths_from_db`가 경기 1~2개로 산출한 attack/defense를 극단값(Haiti attack **0.0**, 1경기 0득점)으로 뱉어 λ를 왜곡 → ELO 뒤집고 draw 부풀림. **수정: 경기수 기반 신뢰도 shrinkage**(n=1→0.3, n=2→0.6, n≥3→1.0)로 중립 1.0 방향 수축: `attack = 1.0 + (raw-1.0)*w`. ELO가 저표본 매치업을 주도하게 됨. 함수는 이제 `games`/`attack_raw`/`defense_raw`도 반환(비파괴). 검증: Haiti 0.0→**0.7**(카드 표시도 정상화). **`_expected_goals`에 ELO override 경고 로그**: `|elo_diff|≥100`인데 strength-driven λ가 ELO 우세팀을 뒤집고 `|lam-mu|≥0.25`일 때만 stderr WARN(=실제 reversal만, 104경기 중 4건 — 노이즈 X).
 - **BUG3 (xG cap).** `_expected_goals` + `apply_user_notes` λ/μ 상한 **3.0→5.0**(하한 0.3 유지=양수 보장). MAX_GOALS=6 헤드룸 충분. 검증: 14경기가 새 헤드룸(>3.0) 사용 → 강팀 xG 압축 해제. **주의: "xG For" 카드는 `_match_strength` 원시 평균(cap 없음)** — 운영자가 본 "3.00 cap"은 사실 λ 상한이었음.
 - **BUG5 (upset 항상 0%).** 기존 패턴매처 k-NN이 elo_diff를 무시(historical feature가 elo_diff=0 하드코딩→std 무한대→무시)하고 팀 평균 피처로 최근접 이웃 → favorite 매치업에서 거의 0% 고정. **수정: upset = ELO 약체의 모델(캘리브레이션) 승률.** `_build_pre_match_bundle`에서 `upset_pct = round(cwa if elo1≥elo2 else cwh)`. 검증: 31/33/27 = 10/27/24%, 라이브 match/33 = **11%**(데이터 다름, 비0 확인). 내러티브 문구도 갱신. `_pattern_matcher` 전역은 보존(upset 용도만 제거).
@@ -318,6 +330,13 @@ FLASK_DEBUG=True
 - **draw cap(0.35) 미적용 — 운영자 결정(2026-06-20).** 재도입 시 반드시 **argmax-safe**(draw가 argmax 아닐 때만, 초과분 home/away 비례 재분배)로, /methodology에 명기. 무지성 draw 억제는 §11.9 argmax 규칙 위반.
 - **`static/calibration_report.json`이 /methodology의 진실원.** Railway엔 `results.csv`(martj42, 로컬 temp) 없어 **백테스트 재계산 불가** → JSON을 로컬에서 `--dump`로 만들어 **커밋**해야 라이브 반영. 코드/JSON 어긋남 방지 위해 meta에 `git_commit`/`generated_at` 박힘(페이지 footer 노출).
 - **`backtest_calibration.py`는 라이브 엔진 `DixonColesEngine.predict()` 재사용**(새 엔진 X). 입력(strength/ELO)만 as-of international로 교체. `player_xG_adj`/`situation_mult`는 2026 전용이라 백테스트 미검증(페이지에 명기). scipy 금지 — golden-section.
+
+### 11.10 Knockout 브래킷/진출 (2026-06-28)
+- **sync 팀 교정 필수:** `sync_live_lite` UPDATE에 `home/away_team_id=COALESCE(?,기존)` — `upsert_matches`는 INSERT OR IGNORE라 기존 행을 절대 안 고침. 빼면 knockout이 "2A vs 2B" placeholder 고착(score/status만 갱신). team_id는 score/status와 **항상 같이** UPDATE.
+- **브래킷 wiring 하드코딩(`app.py _KO_R16/_KO_QF/_KO_SF`):** BALLDONTLIE `match_number` 필드 깨짐(전부 6, 신뢰불가). 대신 **R32 kickoff순 = 공식 match# 73-88** 가정 + R16+ feeder는 placeholder "W##" source 라벨에서 복원. R32 일정/순서 바뀌면 wiring 재확인.
+- **트로피 = `board[0]`(우승확률 1위), modal champ 아님.** modal 브래킷(매 경기 favorite 진출)의 최종 우승자와 MC 우승확률 1위는 전력 근소차 시 다를 수 있음(France 11.8 vs Brazil 10.8). 혼란 방지차 트로피는 항상 board[0].
+- **진출확률 = `win + 0.5*draw` (calibrate 후).** match `adv1/adv2`와 `_ko_p_advance` 동일 공식. 연장/승부차기 모델링 안 함(coinflip) — 2018/2022 백테스트 Brier 0.2216으로 검증, 학술 ET×⅓ 시뮬과 동등.
+- **knockout 판정 = `group_name is None`** (조별만 group 존재). `is_knockout`은 PRE 경로에서만 진출% 바로 전환, POST/group 무변경.
 
 ---
 
