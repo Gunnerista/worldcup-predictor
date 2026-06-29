@@ -2236,8 +2236,14 @@ def _team_strengths_from_db(db_path: str = "worldcup.db") -> dict[str, dict[str,
         raw_attack  = float(r["gf"] or 0) / league_avg
         raw_defense = float(r["ga"] or 0) / league_avg
         # Shrink toward 1.0 (league-neutral). At n>=3, w=1.0 -> raw value kept.
-        attack  = 1.0 + (raw_attack  - 1.0) * w
-        defense = 1.0 + (raw_defense - 1.0) * w
+        # Strength floor: a clean-sheet / goalless run over a few games is not a
+        # literal 0.0, which would make a side a *perfect* defense (concedes 0) or
+        # a zero attack in the Poisson model. This bites on the live PostgreSQL,
+        # where only the 2026 sample exists yet (no 2018/2022 history) — a 3-game
+        # clean sheet otherwise sends defense to exactly 0 and the team becomes
+        # unbeatable (e.g. Mexico's champion odds blew up). Keep a small floor.
+        attack  = max(0.25, 1.0 + (raw_attack  - 1.0) * w)
+        defense = max(0.25, 1.0 + (raw_defense - 1.0) * w)
         out[r["name"]] = {
             "attack":      float(round(attack, 4)),
             "defense":     float(round(defense, 4)),
