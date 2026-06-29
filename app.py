@@ -974,17 +974,24 @@ _KO_ITERS = 20000
 _knockout_cache_result = None
 
 
-def _ko_p_advance(dc, x, y, cache):
+def _ko_p_advance(dc, x, y, cache, inp):
     """P(x advances) in a neutral single-leg tie = win + 0.5*draw (calibrated).
     No extra-time/penalty modelling: the draw is split 50/50. Validated on
     2018/2022 knockout (Brier 0.2216) and consistent with the literature that
-    shootouts are ~coin-flips. Pure team data (player adjustment is neutral)."""
+    shootouts are ~coin-flips. Pure team data (player adjustment is neutral).
+
+    inp[team] = (attack*player_adj, defense, elo) is preloaded ONCE per team so
+    the Monte Carlo never hits the DB — predict_from_db would re-query strengths
+    on every matchup, which on PostgreSQL means hundreds of round-trips and a
+    gunicorn worker timeout (the page 500'd; SQLite was just fast enough to hide
+    it). Here we reuse the same _expected_goals/_assemble path with cached inputs."""
     key = (x, y)
     if key in cache:
         return cache[key]
-    pred = dc.predict_from_db(x, y, _elo.get_rating(x), _elo.get_rating(y),
-                              neutral_venue=True)
-    w = pred["win_draw_loss"]
+    ha, hd, he = inp[x]
+    aa, ad, ae = inp[y]
+    lam, mu = dc._expected_goals(he, ae, ha, hd, aa, ad, True)
+    w = dc._assemble(lam, mu, 1)["win_draw_loss"]
     cwh, cwd, cwa = calibrate_wdl(w["home_win"], w["draw"], w["away_win"])
     p = (cwh + 0.5 * cwd) / 100.0
     cache[key] = p
@@ -1026,11 +1033,24 @@ def _compute_knockout(iters=_KO_ITERS, seed=42):
         r32.append((r["id"], h, a, winner))
 
     teams = [t for (_, h, a, _) in r32 for t in (h, a)]
+
+    # Preload per-team model inputs ONCE: (attack*player_adj, defense, elo).
+    # Keeps the Monte Carlo and bracket DB-free (the PG timeout fix above).
+    strengths = _team_strengths_from_db()
+
+    def _team_inputs(name):
+        s = dc._resolve_strength(name, strengths) or {"attack": 1.0, "defense": 1.0}
+        padj = float(dc._player_xg_adjustment(name))
+        return (float(s["attack"]) * padj, float(s["defense"]),
+                float(_elo.get_rating(name)))
+
+    inp = {t: _team_inputs(t) for t in teams}
+
     cache = {}
     rng = random.Random(seed)
 
     def beats(x, y):
-        return x if rng.random() < _ko_p_advance(dc, x, y, cache) else y
+        return x if rng.random() < _ko_p_advance(dc, x, y, cache, inp) else y
 
     reach = {t: {"R16": 0, "QF": 0, "SF": 0, "F": 0, "CHAMP": 0} for t in teams}
 
@@ -1064,7 +1084,7 @@ def _compute_knockout(iters=_KO_ITERS, seed=42):
     # Modal ("most likely") bracket: at each tie the favorite advances. This is
     # the single most-probable path, used to label the visual bracket tree.
     def fav(x, y):
-        return x if _ko_p_advance(dc, x, y, cache) >= 0.5 else y
+        return x if _ko_p_advance(dc, x, y, cache, inp) >= 0.5 else y
 
     modal = {}
     for i, (_id, h, a, fixed) in enumerate(r32):
@@ -1096,7 +1116,7 @@ def _compute_knockout(iters=_KO_ITERS, seed=42):
     r32_col = []
     for num in r32_order:
         _id, h, a, fixed = r32[num - 73]
-        ph = round(_ko_p_advance(dc, h, a, cache) * 100)
+        ph = round(_ko_p_advance(dc, h, a, cache, inp) * 100)
         r32_col.append({
             "id": _id, "done": fixed is not None, "winner": fixed,
             "top": {"team": h, "flag": _flag(h), "pct": ph,
