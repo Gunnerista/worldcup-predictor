@@ -40,13 +40,13 @@
                     </a>
                     {% else %}
                     <div class="bk-match feeder">
-                        <div class="bk-slot">
+                        <div class="bk-slot{% if m.top.through %} win{% endif %}">
                             <span class="bk-name">{{ m.top.flag }} {{ m.top.team }}</span>
-                            <span class="bk-pct">{{ m.top.pct }}%</span>
+                            {% if m.top.through %}<span class="bk-pct bk-through">&check; in</span>{% else %}<span class="bk-pct">{{ m.top.pct }}%</span>{% endif %}
                         </div>
-                        <div class="bk-slot">
+                        <div class="bk-slot{% if m.bot.through %} win{% endif %}">
                             <span class="bk-name">{{ m.bot.flag }} {{ m.bot.team }}</span>
-                            <span class="bk-pct">{{ m.bot.pct }}%</span>
+                            {% if m.bot.through %}<span class="bk-pct bk-through">&check; in</span>{% else %}<span class="bk-pct">{{ m.bot.pct }}%</span>{% endif %}
                         </div>
                     </div>
                     {% endif %}

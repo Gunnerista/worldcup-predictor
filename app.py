@@ -1109,8 +1109,10 @@ def _compute_knockout(iters=_KO_ITERS, seed=42):
     r32_order = expand(r16_order, _KO_R16)      # 16 R32 match numbers, visual order
 
     def reach_cell(team, key):
-        return {"team": team, "flag": _flag(team),
-                "pct": round(reach[team][key] / iters * 100)}
+        p = round(reach[team][key] / iters * 100)
+        # 100% only happens when a completed tie fixed this team into the round,
+        # i.e. it is already through (not a prediction). Flag it for the UI.
+        return {"team": team, "flag": _flag(team), "pct": p, "through": p >= 100}
 
     # R32 column: real ties with advance %, in bracket order.
     r32_col = []

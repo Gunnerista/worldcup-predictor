@@ -410,6 +410,7 @@ img.emoji { height: 1em; width: 1em; vertical-align: -0.12em; margin: 0 1px; }
 .bk-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bk-pct { flex: 0 0 auto; color: var(--text-2); font-size: 11px; }
 .bk-slot.win .bk-pct { color: #6ee7b7; }
+.bk-through { color: #6ee7b7; font-weight: 700; }
 .bk-ft { position: absolute; top: 3px; right: 5px; font-size: 8px; color: var(--muted);
     letter-spacing: .05em; }
 /* horizontal connector stub to the next round */
